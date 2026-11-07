@@ -58,3 +58,33 @@ jobs:
       - name: Test installed GoreeCloud aliases outside checkout
         working-directory: ${{ runner.temp }}
         run: python "${{ github.workspace }}/scripts/runtime_smoke.py"
+
+
+  mcp-transport-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: python -m pip install build setuptools wheel
+      - name: Build distribution wheel
+        run: python -m build --wheel --no-isolation
+      - name: Install wheel with MCP optional dependencies and test tools
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          python -m pip install "${wheel}[ai]" pytest pytest-asyncio pytest-httpbin
+          python -m pip check
+      - name: Run MCP transport and authentication tests (in-memory ASGI, no listeners)
+        run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py
+      - name: Verify inherited MCP auth and metadata regressions
+        run: |
+          python -m pytest -q -o addopts='' tests/ai/test_ai_mcp.py             -k 'TestStaticTokenVerifier or TestMCPServerAuthentication or test_server_metadata_and_tool_annotations'
+      - name: Verify installed MCP entry point
+        working-directory: ${{ runner.temp }}
+        run: goreecloud-web-scraper-mcp --help > /dev/null

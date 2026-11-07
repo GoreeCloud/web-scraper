@@ -38,6 +38,14 @@ print(page.css("h1::text").get())
 
 See the [original upstream README](UPSTREAM_README.md) for broader examples and optional installation instructions. The [upstream documentation](https://scrapling.readthedocs.io/en/latest/) describes the source foundation, not independent GoreeCloud release acceptance.
 
+## MCP transport safety (development)
+
+MCP (Model Context Protocol) is **optional**. After reviewing the optional dependencies, install `.[ai]`; the branded `goreecloud-web-scraper-mcp` command retains the original `scrapling-mcp` compatibility alias. The default stdio transport does not open a TCP listener.
+
+Streamable HTTP is **authenticated by default**. Prefer `SCRAPLING_MCP_AUTH_TOKEN` over a CLI token argument, since command arguments can appear in process listings. Without a token, `--http` refuses to start. The explicit `--no-auth` opt-out is permitted **only on a loopback bind**, and Host/Origin restrictions are enforced. Non-loopback bindings require both an authentication token and an explicit `--allowed-host` list. HTTP itself is not encrypted: if a private remote endpoint is needed, use trusted TLS termination, network isolation and firewall policy. The original environment-variable spelling remains for compatibility.
+
+MCP tools can fetch URLs and open browser sessions using the process's actual network and filesystem privileges. This is **not** a general-purpose SSRF-safe public API. Use only permitted targets, handle sensitive data deliberately, and bound resources. CI validates token, Host/Origin, metadata and startup protections through in-memory MCP HTTP requests, without opening an external network listener. This does not imply full external MCP integration, browser or production acceptance.
+
 ## Checkpoint safety (development)
 
 Spider checkpoints are local state stored as `checkpoint.pkl`. The downstream loader now rejects arbitrary pickle classes, checkpoint symlinks, nonregular files, invalid structures, and checkpoint files over 64 MiB. Writes are atomic and create private temporary files (0600 on POSIX). This is a safety improvement, not a guarantee that arbitrary untrusted checkpoint data is safe or that all custom upstream checkpoint payloads remain compatible.
@@ -50,7 +58,7 @@ Do not import checkpoint files from another person, share a checkpoint directory
 - **Provenance, synchronization, and modification scope:** [IMPORT_PROVENANCE.md](IMPORT_PROVENANCE.md).
 - **Additional bundled component license:** [agent-skill/Scrapling-Skill/LICENSE.txt](agent-skill/Scrapling-Skill/LICENSE.txt).
 - **Third-party acknowledgments:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, and owned loopback HTTP fetcher tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
+- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, owned loopback HTTP fetcher tests, and in-memory MCP security tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
 - **Publishing:** Upstream package/container publishing workflows are not enabled in this rebranded repository.
 
 Use web scraping responsibly, respecting applicable laws, site policies, privacy, and rate limits. Do not treat browser or anti-bot capabilities as permission to access restricted systems.

@@ -1349,10 +1349,11 @@ class TestMCPServerAuthentication:
         server = ScraplingMCPServer()
 
         with patch.object(MCPServer, "run") as mocked_run:
-            server.serve(True, "0.0.0.0", 8000, allow_unauthenticated=True)
+            server.serve(True, "127.0.0.1", 8000, allow_unauthenticated=True)
 
         assert mocked_run.call_args.kwargs["transport"] == "streamable-http"
-        assert server._build_server("0.0.0.0", 8000).settings.auth is None
+        assert mocked_run.call_args.kwargs["transport_security"].enable_dns_rebinding_protection
+        assert server._build_server("127.0.0.1", 8000).settings.auth is None
 
     def test_token_wins_over_the_opt_out(self, monkeypatch):
         """Passing both keeps authentication on instead of silently dropping the token"""
@@ -1360,7 +1361,11 @@ class TestMCPServerAuthentication:
         server = ScraplingMCPServer(auth_token=SHARED_KEY)
 
         with patch.object(MCPServer, "run") as mocked_run:
-            server.serve(True, "0.0.0.0", 8000, allow_unauthenticated=True)
+            server.serve(
+                True, "0.0.0.0", 8000,
+                allowed_hosts=("mcp.example.org:8000",),
+                allow_unauthenticated=True,
+            )
 
         assert mocked_run.call_args.kwargs["transport"] == "streamable-http"
         assert server._build_server("0.0.0.0", 8000).settings.auth is not None
@@ -1578,9 +1583,9 @@ class TestServerToolRegistration:
             result = await client.list_tools()
 
         assert info is not None
-        assert info.title == "Scrapling"
+        assert info.title == "GoreeCloud Web Scraper"
         assert info.version == scrapling_version
-        assert info.website_url and info.icons
+        assert info.website_url and not info.icons
         assert result.ttl_ms == 3_600_000 and result.cache_scope == "public"
 
         annotations = {tool.name: tool.annotations for tool in result.tools if tool.annotations is not None}

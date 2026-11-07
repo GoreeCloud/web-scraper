@@ -86,7 +86,7 @@ rag = [
     "goreecloud-web-scraper[fetchers]",
 ]
 ai = [
-    "mcp>=2.0.0",
+    "mcp>=2.3.0,<3.0",
     "markdownify>=1.2.0",
     "goreecloud-web-scraper[fetchers]",
 ]

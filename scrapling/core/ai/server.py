@@ -5,6 +5,7 @@ from os import environ
 from json import dumps
 from time import monotonic
 from hmac import compare_digest
+from ipaddress import ip_address
 from functools import wraps
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.caching import CacheHint
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import Icon, ImageContent, TextContent, ToolAnnotations
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 from msgspec import ValidationError as MsgspecValidationError
 from pydantic import AnyHttpUrl, BaseModel, Field
 from patchright.async_api import Error as PatchrightError
@@ -1035,6 +1036,21 @@ class ScraplingMCPServer:
         return _translate_response(page, extraction_type, css_selector, main_content_only)
 
     @staticmethod
+    def _is_loopback_bind(host: str) -> bool:
+        """Only literal loopback interfaces or localhost may host anonymous tools."""
+        if host.lower().rstrip(".") == "localhost":
+            return True
+        try:
+            return ip_address(host.strip("[]")).is_loopback
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _loopback_allowed_hosts(port: int) -> Tuple[str, ...]:
+        """Default Host/Origin allowlist for a loopback MCP server."""
+        return (f"localhost:{port}", f"127.0.0.1:{port}", f"[::1]:{port}")
+
+    @staticmethod
     def _transport_security(allowed_hosts: Sequence[str]) -> Optional[TransportSecuritySettings]:
         """Build the DNS-rebinding protection settings for the streamable-http transport."""
         if not allowed_hosts:
@@ -1048,31 +1064,31 @@ class ScraplingMCPServer:
     def _build_server(self, host: str, port: int) -> MCPServer:
         """Build the MCPServer with all tools registered and the optional authentication settings applied."""
         settings: Dict[str, Any] = {
-            "title": "Scrapling",
+            "title": "GoreeCloud Web Scraper",
             "version": __version__,
-            "website_url": "https://scrapling.readthedocs.io/en/latest/ai/mcp-server.html",
-            "icons": [
-                Icon(
-                    src="https://raw.githubusercontent.com/D4Vinci/Scrapling/main/docs/assets/logo.png",
-                    mime_type="image/png",
-                )
-            ],
+            "website_url": "https://github.com/GoreeCloud/web-scraper",
+            # Do not mislabel upstream's logo as GoreeCloud branding.
             "cache_hints": {"tools/list": CacheHint(ttl_ms=3_600_000, scope="public")},
             "instructions": """1. Close sessions when done. Use `list_sessions` to check sessions and settings. Read needed network data before closing; closing removes access to its history.
-2. Unless the user chooses a tool, start with HTTP for low to mid protection; use browsers for strong protection or JavaScript.
+2. Only access permitted targets; prefer ordinary HTTP, and use browsers only when authorized JavaScript rendering is required.
 3. Use `make_request` or `browser_fetch_once` for standalone fetches; they close automatically. Use sessions for related requests or follow-up browser actions and network history.
 4. Fetch tools use `css_selector` to reduce output. HTML/Markdown/text return all matches; snapshots require one match or no selector for the whole page.
 5. Session options persist from opening; fetch options apply per call, with schema defaults.
 6. Each browser session uses one page; finish each call before starting the next in that session.
 7. Network history capturing omits failed/unfinished requests. Limits: 1000 requests and 20 MiB of saved response bodies; oldest records are removed first. Response bodies over 1 MiB are skipped.
-8. For challenges that have a slider with changing speed, don't release the mouse click without checking the page first to see if mouse adjustment needed before releasing. Keep repeating until you are certain.""",
+8. Respect site access policies, rate limits, consent, legal restrictions, and privacy. Do not use browser tooling to bypass access controls.""",
         }
         if self._auth_token:
             base_url = AnyHttpUrl(f"http://{host}:{port}")
             settings["token_verifier"] = _StaticTokenVerifier(self._auth_token)
-            settings["auth"] = AuthSettings(issuer_url=base_url, resource_server_url=base_url)
+            # The opaque static secret is verified by exact comparison; it has no
+            # RFC 8707 resource indicator. Do not assume OAuth resource-bound tokens.
+            settings["auth"] = AuthSettings(
+                issuer_url=base_url, resource_server_url=base_url,
+                validate_token_resource=False,
+            )
 
-        server = MCPServer(name="Scrapling", **settings)
+        server = MCPServer(name="GoreeCloud Web Scraper", **settings)
         # Session management tools
         server.add_tool(
             _mcp_tool(self.browser_open),
@@ -1221,11 +1237,28 @@ class ScraplingMCPServer:
                 f"Pass `--auth-token` (or set the {MCP_AUTH_TOKEN_ENV} environment variable) to require a bearer "
                 f"token, or `--no-auth` to serve it unauthenticated anyway."
             )
-        else:
-            log.warning(
-                f"The MCP server is running over HTTP without authentication, so anyone who can reach "
-                f"{host}:{port} can use every tool, including fetching arbitrary URLs from this machine."
-            )
+        # GoreeCloud privacy/security boundary: anonymous HTTP tools never listen
+        # on non-loopback interfaces. Authenticated remote use requires a declared
+        # Host/Origin allowlist; every loopback HTTP server gets one by default.
+        # No DNS resolution is performed during validation (avoids hostname races).
+        effective_hosts = tuple(allowed_hosts)
+        if http:
+            loopback = self._is_loopback_bind(host)
+            if not loopback and not self._auth_token:
+                raise ValueError("Refusing unauthenticated MCP HTTP on a non-loopback interface")
+            if not loopback and not effective_hosts:
+                raise ValueError("Non-loopback MCP HTTP requires explicit --allowed-host entries")
+            if loopback and not effective_hosts:
+                effective_hosts = self._loopback_allowed_hosts(port)
+            if not self._auth_token and allow_unauthenticated and not set(effective_hosts).issubset(
+                self._loopback_allowed_hosts(port)
+            ):
+                raise ValueError("Unauthenticated MCP HTTP accepts loopback Host/Origin values only")
+            if not self._auth_token and allow_unauthenticated:
+                log.warning(
+                    f"The MCP server is running over HTTP without authentication, so anyone who can reach "
+                    f"{host}:{port} can use every tool, including fetching arbitrary URLs from this machine."
+                )
 
         server = self._build_server(host, port)
         if http:
@@ -1233,7 +1266,7 @@ class ScraplingMCPServer:
                 transport="streamable-http",
                 host=host,
                 port=port,
-                transport_security=self._transport_security(allowed_hosts),
+                transport_security=self._transport_security(effective_hosts),
             )
         else:
             server.run()
