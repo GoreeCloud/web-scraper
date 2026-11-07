@@ -60,13 +60,19 @@ Spider checkpoints are local state stored as `checkpoint.pkl`. The downstream lo
 
 Do not import checkpoint files from another person, share a checkpoint directory with untrusted users, or rely on saved checkpoints for recovery of sensitive production workloads without additional testing. Unsupported legacy object types are deliberately rejected and start fresh. Operators should keep checkpoint directories private, back up any needed prior state, and restrict access to credentials and scraped content.
 
+## Wheel provenance and build reproducibility (development)
+
+A read-only CI gate builds the package wheel twice using an identical environment and fixed `SOURCE_DATE_EPOCH`, compares the resulting bytes, then validates the archive's embedded BSD-3-Clause license against the exact repository `LICENSE`, distribution metadata, original D4Vinci/Scrapling attribution, preserved CLI aliases and every wheel `RECORD` digest. Negative checks must reject a tampered payload and a missing license. The SHA-256 is written to CI logs / job summary; the workflow neither publishes packages nor creates a signed release.
+
+Passing this check establishes **only same-run, same-environment artifact reproducibility and local wheel integrity**. Build-tool versions are not fully locked; no independent builder, cross-platform reproducibility, cryptographic attestation, complete dependency-license/SBOM evaluation or production release approval is implied.
+
 ## Governance and provenance
 
 - **License:** [BSD 3-Clause](LICENSE), preserving upstream copyright.
 - **Provenance, synchronization, and modification scope:** [IMPORT_PROVENANCE.md](IMPORT_PROVENANCE.md).
 - **Additional bundled component license:** [agent-skill/Scrapling-Skill/LICENSE.txt](agent-skill/Scrapling-Skill/LICENSE.txt).
 - **Third-party acknowledgments:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, owned loopback HTTP fetcher tests, browser configuration privacy defaults, and in-memory MCP security tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
+- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, owned loopback HTTP fetcher tests, browser configuration privacy and sandbox defaults, in-memory MCP security tests, and same-environment wheel reproducibility/integrity checks. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
 - **Publishing:** Upstream package/container publishing workflows are not enabled in this rebranded repository.
 
 Use web scraping responsibly, respecting applicable laws, site policies, privacy, and rate limits. Do not treat browser or anti-bot capabilities as permission to access restricted systems.
