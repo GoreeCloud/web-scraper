@@ -25,3 +25,7 @@ The historical upstream commits remain attributed to their original authors. Lat
 ## Future upstream updates
 
 Fetch original upstream into a local import branch, inspect the incoming diff and licensing, review dependency and workflow changes, resolve downstream rebranding conflicts, run tests, and merge through the repository's normal release gates. Do not blindly mirror upstream deployment workflows or force-push the downstream default branch.
+
+## Downstream checkpoint hardening
+
+A subsequent downstream change introduces a bounded, restricted checkpoint pickle loader and private atomic writes. This does not modify the pinned upstream source commit or imply a complete security audit; some unsupported custom checkpoint objects may fail closed rather than restore. Inspect the current Git history and CI results for exact validation status.

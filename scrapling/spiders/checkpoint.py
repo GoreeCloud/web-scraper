@@ -1,6 +1,16 @@
+"""Checkpoint persistence with explicitly restricted, bounded pickle loading.
+
+The imported format remains compatible with ordinary CheckpointData/Request records,
+but externally supplied or altered pickle classes are never constructed. Checkpoints
+are local, private state and must not be imported from untrusted sources.
+"""
+import io
+import os
 import pickle
-from pathlib import Path
+import stat
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import anyio
 from anyio import Path as AsyncPath
@@ -11,6 +21,9 @@ from scrapling.core._types import Set, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from scrapling.spiders.request import Request
 
+# Limit persistent state to avoid excessive allocations from untrusted files.
+MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024
+
 
 @dataclass
 class CheckpointData:
@@ -20,8 +33,81 @@ class CheckpointData:
     seen: Set[bytes] = field(default_factory=set)
 
 
+class _RestrictedCheckpointUnpickler(pickle.Unpickler):
+    """Only instantiate the two known data types and standard set containers."""
+
+    _ALLOWED = {
+        ("scrapling.spiders.checkpoint", "CheckpointData"),
+        ("scrapling.spiders.request", "Request"),
+        ("builtins", "set"),
+        ("builtins", "frozenset"),
+    }
+
+    def find_class(self, module: str, name: str):
+        if (module, name) not in self._ALLOWED:
+            raise pickle.UnpicklingError(f"Disallowed checkpoint object: {module}.{name}")
+        if module == "builtins":
+            return {"set": set, "frozenset": frozenset}[name]
+        if name == "CheckpointData":
+            return CheckpointData
+        from scrapling.spiders.request import Request
+        return Request
+
+
+def _read_checkpoint(path: Path) -> CheckpointData:
+    # On supported Unix hosts, O_NOFOLLOW prevents final-component symlink swaps.
+    # O_NONBLOCK prevents a replaced FIFO from blocking the crawler indefinitely.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    if getattr(os, "O_NOFOLLOW", 0):
+        flags |= os.O_NOFOLLOW
+    elif path.is_symlink():
+        raise ValueError("Checkpoint symlinks are not allowed")
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("Checkpoint must be a regular file")
+        if info.st_size > MAX_CHECKPOINT_BYTES:
+            raise ValueError("Checkpoint exceeds size limit")
+        content = f.read(MAX_CHECKPOINT_BYTES + 1)
+    if len(content) > MAX_CHECKPOINT_BYTES:
+        raise ValueError("Checkpoint exceeds size limit")
+    data = _RestrictedCheckpointUnpickler(io.BytesIO(content)).load()
+    from scrapling.spiders.request import Request
+    if not isinstance(data, CheckpointData):
+        raise ValueError("Checkpoint data type is invalid")
+    if not isinstance(data.requests, list) or not all(
+        isinstance(item, Request) for item in data.requests
+    ):
+        raise ValueError("Checkpoint request records are invalid")
+    if not isinstance(data.seen, set) or not all(
+        isinstance(item, (bytes, str)) for item in data.seen
+    ):
+        raise ValueError("Checkpoint seen fingerprints are invalid")
+    return data
+
+
+def _atomic_checkpoint_write(path: Path, data: bytes) -> None:
+    if len(data) > MAX_CHECKPOINT_BYTES:
+        raise ValueError("Checkpoint exceeds size limit")
+    fd, name = tempfile.mkstemp(prefix=".checkpoint-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.lexists(name):
+            os.unlink(name)
+
+
 class CheckpointManager:
-    """Manages saving and loading checkpoint state to/from disk."""
+    """Manages saving and loading checkpoint state to/from disk.
+
+    Legacy pickle data is accepted only when its objects are on the fixed allowlist.
+    Arbitrary Python classes and symlinks are rejected without deserialization.
+    """
 
     CHECKPOINT_FILE = "checkpoint.pkl"
 
@@ -31,51 +117,35 @@ class CheckpointManager:
         self.interval = interval
         if not isinstance(interval, (int, float)):
             raise TypeError("Checkpoints interval must be integer or float.")
-        else:
-            if interval < 0:
-                raise ValueError("Checkpoints interval must be equal or greater than 0.")
+        elif interval < 0:
+            raise ValueError("Checkpoints interval must be equal or greater than 0.")
 
     async def has_checkpoint(self) -> bool:
-        """Check if a checkpoint exists."""
         return await self._checkpoint_path.exists()
 
     async def save(self, data: CheckpointData) -> None:
-        """Save checkpoint data to disk atomically."""
+        """Save checkpoint atomically with private (0600) temporary permissions."""
         await self.crawldir.mkdir(parents=True, exist_ok=True)
-
-        temp_path = self._checkpoint_path.with_suffix(".tmp")
-
         try:
             serialized = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-            async with await anyio.open_file(temp_path, "wb") as f:
-                await f.write(serialized)
-
-            await temp_path.replace(self._checkpoint_path)
-
+            await anyio.to_thread.run_sync(
+                _atomic_checkpoint_write, Path(self._checkpoint_path), serialized
+            )
             log.info(f"Checkpoint saved: {len(data.requests)} requests, {len(data.seen)} seen URLs")
         except Exception as e:
-            # Clean up temp file if it exists
-            if await temp_path.exists():
-                await temp_path.unlink()
             log.error(f"Failed to save checkpoint: {e}")
             raise
 
     async def load(self) -> Optional[CheckpointData]:
-        """Load checkpoint data from disk.
-
-        Returns None if no checkpoint exists or if loading fails.
-        """
+        """Load allowed local records; fail closed for corrupt/untrusted state."""
         if not await self.has_checkpoint():
             return None
-
         try:
-            async with await anyio.open_file(self._checkpoint_path, "rb") as f:
-                content = await f.read()
-                data: CheckpointData = pickle.loads(content)
-
+            data = await anyio.to_thread.run_sync(
+                _read_checkpoint, Path(self._checkpoint_path)
+            )
             log.info(f"Checkpoint loaded: {len(data.requests)} requests, {len(data.seen)} seen URLs")
             return data
-
         except Exception as e:
             log.error(f"Failed to load checkpoint (starting fresh): {e}")
             return None

@@ -38,13 +38,19 @@ print(page.css("h1::text").get())
 
 See the [original upstream README](UPSTREAM_README.md) for broader examples and optional installation instructions. The [upstream documentation](https://scrapling.readthedocs.io/en/latest/) describes the source foundation, not independent GoreeCloud release acceptance.
 
+## Checkpoint safety (development)
+
+Spider checkpoints are local state stored as `checkpoint.pkl`. The downstream loader now rejects arbitrary pickle classes, checkpoint symlinks, nonregular files, invalid structures, and checkpoint files over 64 MiB. Writes are atomic and create private temporary files (0600 on POSIX). This is a safety improvement, not a guarantee that arbitrary untrusted checkpoint data is safe or that all custom upstream checkpoint payloads remain compatible.
+
+Do not import checkpoint files from another person, share a checkpoint directory with untrusted users, or rely on saved checkpoints for recovery of sensitive production workloads without additional testing. Unsupported legacy object types are deliberately rejected and start fresh. Operators should keep checkpoint directories private, back up any needed prior state, and restrict access to credentials and scraped content.
+
 ## Governance and provenance
 
 - **License:** [BSD 3-Clause](LICENSE), preserving upstream copyright.
 - **Provenance, synchronization, and modification scope:** [IMPORT_PROVENANCE.md](IMPORT_PROVENANCE.md).
 - **Additional bundled component license:** [agent-skill/Scrapling-Skill/LICENSE.txt](agent-skill/Scrapling-Skill/LICENSE.txt).
 - **Third-party acknowledgments:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Validation:** The import CI performs static integrity checks; full runtime, browser, and security testing are separate release gates.
+- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package smoke checks, parser regression tests and bounded checkpoint-safety tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
 - **Publishing:** Upstream package/container publishing workflows are not enabled in this rebranded repository.
 
 Use web scraping responsibly, respecting applicable laws, site policies, privacy, and rate limits. Do not treat browser or anti-bot capabilities as permission to access restricted systems.
