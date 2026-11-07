@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Import and license integrity
@@ -33,18 +33,21 @@ jobs:
       matrix:
         python-version: ['3.10', '3.12', '3.13']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install build and test tools
         run: python -m pip install build setuptools wheel pytest pytest-asyncio
       - name: Build wheel from reviewed sources
         run: python -m build --wheel --no-isolation
-      - name: Install wheel and minimal offline test dependencies
-        run: python -m pip install dist/*.whl "anyio>=4.14" "curl_cffi>=0.16.3"
+      - name: Install wheel with declared fetcher extras
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          python -m pip install "${wheel}[fetchers]"
       - name: Test imported parser and checkpoint behavior
         run: python -m pytest -q -o addopts='' tests/parser tests/spiders/test_checkpoint.py tests/goreecloud/test_checkpoint_safety.py
       - name: Test installed GoreeCloud aliases outside checkout
