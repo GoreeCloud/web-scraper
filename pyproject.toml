@@ -3,17 +3,17 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scrapling"
+name = "goreecloud-web-scraper"
 # Static version instead of a dynamic version so we can get better layer caching while building docker, check the docker file to understand
 version = "0.5.1"
-description = "Scrapling is an undetectable, powerful, flexible, high-performance Python framework that makes Web Scraping easy and effortless as it should be!"
+description = "GoreeCloud Web Scraper: a BSD-3-Clause rebranded distribution derived from D4Vinci/Scrapling."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {file = "LICENSE"}
 authors = [
     {name = "Karim Shoair", email = "scrapling@proton.me"}
 ]
 maintainers = [
-    {name = "Karim Shoair", email = "scrapling@proton.me"}
+    {name = "GoreeCloud"}
 ]
 keywords = [
     "web-scraping",
@@ -83,32 +83,32 @@ fetchers = [
 ]
 rag = [
     "markdownify>=1.2.0",
-    "scrapling[fetchers]",
+    "goreecloud-web-scraper[fetchers]",
 ]
 ai = [
     "mcp>=2.0.0",
     "markdownify>=1.2.0",
-    "scrapling[fetchers]",
+    "goreecloud-web-scraper[fetchers]",
 ]
 shell = [
     "IPython>=8.37",  # The last version that supports Python 3.10
     "markdownify>=1.2.0",
-    "scrapling[fetchers]",
+    "goreecloud-web-scraper[fetchers]",
 ]
 all = [
-    "scrapling[ai,shell]",
+    "goreecloud-web-scraper[ai,shell]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/D4Vinci/Scrapling"
-Changelog = "https://scrapling.readthedocs.io/en/latest/changelog.html"
-Documentation = "https://scrapling.readthedocs.io/en/latest/"
-Repository = "https://github.com/D4Vinci/Scrapling"
-"Bug Tracker" = "https://github.com/D4Vinci/Scrapling/issues"
-"Discord" = "https://discord.gg/EMgGbDceNQ"
-"Release Notes" = "https://github.com/D4Vinci/Scrapling/releases"
+Homepage = "https://github.com/GoreeCloud/web-scraper"
+Repository = "https://github.com/GoreeCloud/web-scraper"
+"Bug Tracker" = "https://github.com/GoreeCloud/web-scraper/issues"
+"Original Upstream" = "https://github.com/D4Vinci/Scrapling"
+"Upstream Documentation" = "https://scrapling.readthedocs.io/en/latest/"
 
 [project.scripts]
+goreecloud-web-scraper = "scrapling.cli:main"
+goreecloud-web-scraper-mcp = "scrapling.cli:mcp"
 scrapling = "scrapling.cli:main"
 scrapling-mcp = "scrapling.cli:mcp"
 
@@ -118,7 +118,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["scrapling*"]
+include = ["scrapling*", "goreecloud_web_scraper*"]
 
 [tool.mypy]
 python_version = "3.10"

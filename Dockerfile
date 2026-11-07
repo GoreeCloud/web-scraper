@@ -1,6 +1,6 @@
 FROM python:3.12-slim-trixie
 
-LABEL io.modelcontextprotocol.server.name="io.github.D4Vinci/Scrapling"
+LABEL io.modelcontextprotocol.server.name="io.github.GoreeCloud/web-scraper"
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Set environment variables
@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 EXPOSE 8000
 
 # Set entrypoint to run scrapling
-ENTRYPOINT ["uv", "run", "scrapling"]
+ENTRYPOINT ["uv", "run", "goreecloud-web-scraper"]
 
 # Default command (can be overridden)
 CMD ["--help"]
