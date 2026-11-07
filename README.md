@@ -38,6 +38,12 @@ print(page.css("h1::text").get())
 
 See the [original upstream README](UPSTREAM_README.md) for broader examples and optional installation instructions. The [upstream documentation](https://scrapling.readthedocs.io/en/latest/) describes the source foundation, not independent GoreeCloud release acceptance.
 
+## Browser privacy defaults (development)
+
+The inherited browser engine's earlier defaults allowed geolocation and notification permissions without consent, ignored HTTPS certificate errors and allowed service workers. GoreeCloud Web Scraper now defaults to `permissions=[]`, `ignore_https_errors=False`, and `service_workers="block"` for local and remote stealth browser contexts. These defaults are verified by offline CI tests. A caller who intentionally needs a sensitive capability can explicitly opt in with the existing `additional_args` settings, which should be scoped to an authorized use case.
+
+Service-worker restrictions and a page-request interceptor are **not** general network isolation. A local development smoke can use the opt-in `scripts/browser_loopback_smoke.py` script with a reviewed browser executable and SHA-256, running against an owned temporary 127.0.0.1 server. Run it only in an approved isolated development environment with `GOREECLOUD_BROWSER_EXECUTABLE` and `GOREECLOUD_BROWSER_SHA256` provided for the exact reviewed executable. This browser probe is not part of the hosted CI matrix and is not evidence of safe arbitrary web browsing. The imported Chromium launch was observed using `--no-sandbox`; a sandbox and network isolation review is a remaining Wardveil release prerequisite. Do not run untrusted pages or production scraping until the browser execution boundary has been reviewed and accepted.
+
 ## MCP transport safety (development)
 
 MCP (Model Context Protocol) is **optional**. After reviewing the optional dependencies, install `.[ai]`; the branded `goreecloud-web-scraper-mcp` command retains the original `scrapling-mcp` compatibility alias. The default stdio transport does not open a TCP listener.
@@ -58,7 +64,7 @@ Do not import checkpoint files from another person, share a checkpoint directory
 - **Provenance, synchronization, and modification scope:** [IMPORT_PROVENANCE.md](IMPORT_PROVENANCE.md).
 - **Additional bundled component license:** [agent-skill/Scrapling-Skill/LICENSE.txt](agent-skill/Scrapling-Skill/LICENSE.txt).
 - **Third-party acknowledgments:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, owned loopback HTTP fetcher tests, and in-memory MCP security tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
+- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, owned loopback HTTP fetcher tests, browser configuration privacy defaults, and in-memory MCP security tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
 - **Publishing:** Upstream package/container publishing workflows are not enabled in this rebranded repository.
 
 Use web scraping responsibly, respecting applicable laws, site policies, privacy, and rate limits. Do not treat browser or anti-bot capabilities as permission to access restricted systems.

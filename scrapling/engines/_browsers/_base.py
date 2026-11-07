@@ -579,12 +579,15 @@ class StealthySessionMixin(BaseSessionMixin):
             {
                 "is_mobile": False,
                 "has_touch": False,
-                # I'm thinking about disabling it to rest from all Service Workers' headache, but let's keep it as it is for now
-                "service_workers": "allow",
-                "ignore_https_errors": True,
+                # GoreeShield privacy and Wardveil security defaults: never
+                # silently allow service-worker interception, invalid TLS,
+                # device geolocation or notifications. Advanced callers may
+                # explicitly opt in through additional_args as before.
+                "service_workers": "block",
+                "ignore_https_errors": False,
                 "screen": {"width": 1920, "height": 1080},
                 "viewport": {"width": 1920, "height": 1080},
-                "permissions": ["geolocation", "notifications"],
+                "permissions": [],
             }
         )
         self.__generate_stealth_options()
