@@ -531,6 +531,13 @@ class BaseSessionMixin:
                 __default_chrome_useragent__ if config.real_chrome else __default_useragent__
             )
 
+        if any(name in config.additional_args for name in (
+            "chromium_sandbox", "args", "ignore_default_args"
+        )):
+            raise ValueError(
+                "Browser launch options belong in dedicated session parameters or "
+                "validated extra_flags, not additional_args"
+            )
         if config.additional_args:
             self._context_options.update(config.additional_args)
 
@@ -540,6 +547,18 @@ class BaseSessionMixin:
         flags = self._browser_options["args"]
         if config.extra_flags or extra_flags:
             flags = list(set(tuple(flags) + tuple(extra_flags or ()) + tuple(config.extra_flags or ())))
+        if config.chromium_sandbox and any(
+            flag.split("=", 1)[0] in {
+                "--no-sandbox",
+                "--disable-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-seccomp-filter-sandbox",
+                "--disable-namespace-sandbox",
+                "--disable-gpu-sandbox",
+            }
+            for flag in flags
+        ):
+            raise ValueError("Unsafe Chromium sandbox-disabling flags require chromium_sandbox=False")
         if config.dns_over_https:
             flags = list(flags) + ["--dns-over-https-templates=https://cloudflare-dns.com/dns-query"]
         if config.locale:
@@ -547,7 +566,12 @@ class BaseSessionMixin:
             accept_lang = f"{config.locale},{base_lang}" if base_lang != config.locale.lower() else config.locale
             flags = list(flags) + [f"--lang={config.locale}", f"--accept-lang={accept_lang}"]
         self._browser_options.update(
-            {"args": flags, "headless": config.headless, "channel": "chrome" if config.real_chrome else "chromium"}
+            {
+                "args": flags,
+                "headless": config.headless,
+                "channel": "chrome" if config.real_chrome else "chromium",
+                "chromium_sandbox": config.chromium_sandbox,
+            }
         )
         if config.executable_path:
             self._browser_options["executable_path"] = config.executable_path
