@@ -50,7 +50,7 @@ Do not import checkpoint files from another person, share a checkpoint directory
 - **Provenance, synchronization, and modification scope:** [IMPORT_PROVENANCE.md](IMPORT_PROVENANCE.md).
 - **Additional bundled component license:** [agent-skill/Scrapling-Skill/LICENSE.txt](agent-skill/Scrapling-Skill/LICENSE.txt).
 - **Third-party acknowledgments:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package smoke checks, parser regression tests and bounded checkpoint-safety tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
+- **Validation:** CI performs static import and license integrity, Python 3.10/3.12/3.13 wheel/package and CLI smoke checks, parser/checkpoint regressions, and owned loopback HTTP fetcher tests. Live HTTP/browser/MCP integration, dependency security and production acceptance remain separate release gates.
 - **Publishing:** Upstream package/container publishing workflows are not enabled in this rebranded repository.
 
 Use web scraping responsibly, respecting applicable laws, site policies, privacy, and rate limits. Do not treat browser or anti-bot capabilities as permission to access restricted systems.

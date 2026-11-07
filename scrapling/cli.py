@@ -107,7 +107,7 @@ def __BuildRequest(headers: List[str], cookies: str, params: str, json: Optional
     return {**request_kwargs, **kwargs}
 
 
-@command(help="Install all Scrapling's Fetchers dependencies")
+@command(help="Install GoreeCloud Web Scraper fetcher dependencies")
 @option(
     "-f",
     "--force",
@@ -115,7 +115,7 @@ def __BuildRequest(headers: List[str], cookies: str, params: str, json: Optional
     is_flag=True,
     default=False,
     type=bool,
-    help="Force Scrapling to reinstall all Fetchers dependencies",
+    help="Force GoreeCloud Web Scraper to reinstall fetcher dependencies",
 )
 def install(force):  # pragma: no cover
     if force or not __PACKAGE_DIR__.joinpath(".scrapling_dependencies_installed").exists():
@@ -142,7 +142,7 @@ def install(force):  # pragma: no cover
         print("The dependencies are already installed")
 
 
-@command(help="Run Scrapling's MCP server (Check the docs for more info).")
+@command(help="Run GoreeCloud Web Scraper MCP server (see the docs for more information).")
 @option(
     "--http",
     is_flag=True,
@@ -662,7 +662,7 @@ def fetch(
 
 
 @group()
-@version_option(version=__version__, prog_name="Scrapling")
+@version_option(version=__version__, prog_name="GoreeCloud Web Scraper")
 def main():
     pass
 
