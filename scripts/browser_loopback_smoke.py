@@ -73,6 +73,7 @@ def main():
             result = StealthyFetcher.fetch(
                 url,
                 headless=True,
+                chromium_sandbox=True,
                 executable_path=str(BROWSER),
                 user_data_dir=profile,
                 page_setup=make_page_setup(server.server_port),

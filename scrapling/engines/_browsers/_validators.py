@@ -61,6 +61,9 @@ class PlaywrightConfig(Struct, kw_only=True, frozen=False, weakref=True):
 
     max_pages: PagesCount = 1
     headless: bool = True
+    # Patchright/Playwright defaults to unsandboxed Chromium unless explicitly enabled.
+    # Fail closed on Linux hosts without usable browser-sandbox support.
+    chromium_sandbox: bool = True
     disable_resources: bool = False
     network_idle: bool = False
     load_dom: bool = True

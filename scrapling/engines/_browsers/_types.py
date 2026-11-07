@@ -64,6 +64,7 @@ class DataRequestParams(GetRequestParams, total=False):
 class _BrowserSession(TypedDict, total=False):
     max_pages: int
     headless: bool
+    chromium_sandbox: bool
     disable_resources: bool
     network_idle: bool
     load_dom: bool
