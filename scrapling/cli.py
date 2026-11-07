@@ -154,7 +154,8 @@ def install(force):  # pragma: no cover
     type=str,
     default="127.0.0.1",
     help="The host to use if streamable-http transport is enabled. Pass '0.0.0.0' to accept connections from "
-    "the network (Default: '127.0.0.1')",
+    "the network (requires --auth-token and --allowed-host; terminate TLS at a trusted proxy). "
+    "Anonymous HTTP is loopback-only (Default: '127.0.0.1')",
 )
 @option(
     "--port", type=int, default=8000, help="The port to use if streamable-http transport is enabled (Default: 8000)"
@@ -177,14 +178,14 @@ def install(force):  # pragma: no cover
     type=str,
     multiple=True,
     help="Enable DNS-rebinding protection and accept requests for this host only, like 'mcp.example.com:8000' "
-    "(repeatable). Recommended whenever the server listens on a public address",
+    "(repeatable). Required when the server listens on a non-loopback address",
 )
 @option(
     "--no-auth",
     is_flag=True,
     default=False,
     help="Serve the streamable-http transport without authentication (not recommended). Without it, `--http` "
-    "refuses to start unless a token is given",
+    "refuses to start unless a token is given; anonymous HTTP is restricted to loopback",
 )
 def mcp(http, host, port, executable_path, auth_token, allowed_host, no_auth):
     from scrapling.core.ai import ScraplingMCPServer
