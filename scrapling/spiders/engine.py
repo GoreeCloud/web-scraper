@@ -35,6 +35,8 @@ class CrawlerEngine:
         session_manager: SessionManager,
         crawldir: Optional[Union[str, Path, AsyncPath]] = None,
         interval: float = 300.0,
+        *,
+        checkpoint_format: str = "pickle",
     ):
         self.spider = spider
         self.session_manager = session_manager
@@ -87,7 +89,9 @@ class CrawlerEngine:
         self._item_stream: Any = None
 
         self._checkpoint_system_enabled = bool(crawldir)
-        self._checkpoint_manager = CheckpointManager(crawldir or "", interval)
+        self._checkpoint_manager = CheckpointManager(
+            crawldir or "", interval, checkpoint_format=checkpoint_format
+        )
         self._last_checkpoint_time: float = 0.0
         self._pause_requested: bool = False
         self._force_stop: bool = False
