@@ -6,6 +6,7 @@ from json import dumps
 from time import monotonic
 from hmac import compare_digest
 from ipaddress import ip_address
+from ._target_policy import MCPDestinationPolicy
 from functools import wraps
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -234,7 +235,14 @@ async def _stop_screencast(page: Any) -> None:
 
 
 class ScraplingMCPServer:
-    def __init__(self, executable_path: Optional[str] = None, auth_token: Optional[str] = None):
+    def __init__(
+        self,
+        executable_path: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        allowed_target_origins: Sequence[str] = (),
+        allow_loopback_targets: bool = False,
+        enable_unrestricted_browser_tools: bool = False,
+    ):
         """Create a Scrapling MCP server.
 
         :param executable_path: Optional global Chromium-compatible browser executable path for browser tools.
@@ -246,6 +254,43 @@ class ScraplingMCPServer:
         self._sessions: Dict[str, _SessionEntry] = {}
         self._executable_path = executable_path or environ.get(MCP_EXECUTABLE_PATH_ENV) or None
         self._auth_token = auth_token or environ.get(MCP_AUTH_TOKEN_ENV) or None
+        # Applied when served via the official MCP runner; direct library access
+        # retains historical import/API behavior until explicitly served.
+        self._served = False
+        self._targets = MCPDestinationPolicy(tuple(allowed_target_origins), allow_loopback_targets)
+        self._enable_unrestricted_browser_tools = enable_unrestricted_browser_tools
+
+    def _require_browser_tool(self) -> None:
+        if self._served and not self._enable_unrestricted_browser_tools:
+            raise ValueError(
+                "Browser MCP tools are disabled by default: browser navigation, redirects, "
+                "JavaScript and subresources are not yet confined by the target policy"
+            )
+
+    async def _require_static_target(
+        self,
+        url: str,
+        *,
+        follow_redirects: FollowRedirects = "safe",
+        verify: Optional[bool] = True,
+        proxy: Optional[str] = None,
+        headers: Optional[Mapping[str, Optional[str]]] = None,
+    ) -> FollowRedirects:
+        if not self._served:
+            return follow_redirects
+        if proxy:
+            raise ValueError("Per-request HTTP proxies are disabled for served MCP tools")
+        if verify is False:
+            raise ValueError("Disabling TLS verification is not allowed for served MCP tools")
+        if follow_redirects is True:
+            raise ValueError("Automatic redirects are disabled for served MCP tools")
+        if headers and any(name.lower() in {
+            "host", "proxy-authorization", "forwarded", "x-forwarded-host",
+            "x-original-host", "x-rewrite-url", "x-original-url",
+        } for name in headers):
+            raise ValueError("Host/proxy/routing override headers are prohibited")
+        await self._targets.require(url)
+        return False
 
     def _resolve_executable_path(self, executable_path: Optional[str]) -> Optional[str]:
         """Return a per-call executable path or the server-wide default."""
@@ -328,6 +373,7 @@ class ScraplingMCPServer:
         ] = None,
     ) -> SessionCreatedModel:
         """Open a reusable local or remote browser session. Pass per-request options to `browser_fetch`."""
+        self._require_browser_tool()
         session_id = self._new_session_id(session_id)
         options: Dict[str, Any] = dict(
             proxy=proxy,
@@ -399,6 +445,8 @@ class ScraplingMCPServer:
     ) -> SessionCreatedModel:
         """Open a reusable HTTP session for `session_make_request`, keeping cookies, connections, and request settings."""
         session_id = self._new_session_id(session_id)
+        if self._served and proxy:
+            raise ValueError("Persistent HTTP proxy is forbidden for served MCP sessions")
         session = FetcherSession(impersonate=impersonate, proxy=proxy)
         await session.__aenter__()
         return self._register_session(session_id, session, "static")
@@ -584,6 +632,7 @@ class ScraplingMCPServer:
         Element mouse targets auto-wait and scroll into view; coordinates and wheel do not wait for navigation or scrolling.
         mouse_down holds across calls for observation and further moves; mouse_up releases, including after errors.
         For drag and drop, move over the target twice before releasing. Cancelled/timed-out clicks attempt release."""
+        self._require_browser_tool()
         _validate_actions(actions)
         with self._browser_page(session_id) as (_, page):
             await _run_actions(page, actions, slowly)
@@ -607,6 +656,7 @@ class ScraplingMCPServer:
         """Run JavaScript on the current page, await promises, and return JSON text without a snapshot.
         Return JSON-compatible values; null/undefined become null. Script effects are not undone on failure.
         Cancellation stops waiting, but may not stop the script."""
+        self._require_browser_tool()
         with self._browser_page(session_id) as (_, page):
             return dumps(
                 await page.evaluate(expression, arg=arg, isolated_context=isolated_context),
@@ -716,8 +766,8 @@ class ScraplingMCPServer:
                 )
             ]
 
-    @staticmethod
     async def make_request(
+        self,
         url: Annotated[str, Field(description="URL to fetch.")],
         method: Annotated[SUPPORTED_HTTP_METHODS, Field(description="HTTP method.")] = "GET",
         impersonate: Annotated[
@@ -767,6 +817,11 @@ class ScraplingMCPServer:
         ] = True,
     ) -> ResponseModel:
         """Make an HTTP request without JavaScript. Suitable for low-to-mid protection."""
+        follow_redirects = await self._require_static_target(
+            url, follow_redirects=follow_redirects, verify=verify, proxy=proxy, headers=headers
+        )
+        if self._served and proxy_auth:
+            raise ValueError("Proxy authentication is forbidden for served MCP requests")
         normalized_proxy_auth = _normalize_credentials(proxy_auth)
         normalized_auth = _normalize_credentials(auth)
 
@@ -865,6 +920,7 @@ class ScraplingMCPServer:
         pierce_shadow: Annotated[bool, Field(description="Include open Shadow DOM content.")] = False,
     ) -> ResponseModel:
         """Fetch a page with a stealth browser and JavaScript rendering."""
+        self._require_browser_tool()
         async with AsyncStealthySession(
             wait=wait,
             proxy=proxy,
@@ -947,6 +1003,7 @@ class ScraplingMCPServer:
         ] = False,
     ) -> ResponseModel:
         """Fetch a URL in an open stealthy browser session. Options apply only to this request."""
+        self._require_browser_tool()
         entry = self._get_session(session_id, expected_type=["stealthy"])
         fetch_params = dict(
             wait=wait,
@@ -1014,6 +1071,9 @@ class ScraplingMCPServer:
     ) -> ResponseModel:
         """Make an HTTP request using the session's cookies, connections, impersonation, and proxy. Options apply to this request."""
         entry = self._get_session(session_id, expected_type=["static"])
+        follow_redirects = await self._require_static_target(
+            url, follow_redirects=follow_redirects, verify=verify, headers=headers
+        )
 
         request_kwargs: Dict[str, Any] = dict(
             auth=_normalize_credentials(auth),
@@ -1220,6 +1280,14 @@ class ScraplingMCPServer:
         :param allow_unauthenticated: Start the streamable-http transport without a token. The transport
             requires authentication by default, so this is the explicit opt-out.
         """
+        if http and self._enable_unrestricted_browser_tools and not self._is_loopback_bind(host):
+            raise ValueError(
+                "Unrestricted browser tools cannot be exposed on a non-loopback MCP listener"
+            )
+        if self._targets.allow_loopback and http and not self._is_loopback_bind(host):
+            raise ValueError(
+                "Loopback target authorization requires the MCP listener itself to bind to loopback"
+            )
         if not http:
             if self._auth_token:
                 log.warning(
@@ -1233,7 +1301,7 @@ class ScraplingMCPServer:
         elif not allow_unauthenticated:
             raise ValueError(
                 f"Refusing to serve the MCP server over HTTP without authentication because anyone who can reach "
-                f"{host}:{port} would be able to use every tool, including fetching arbitrary URLs from this machine. "
+                f"{host}:{port} would be able to use every tool, although served outbound HTTP targets and browser tools are now restricted by default. "
                 f"Pass `--auth-token` (or set the {MCP_AUTH_TOKEN_ENV} environment variable) to require a bearer "
                 f"token, or `--no-auth` to serve it unauthenticated anyway."
             )
@@ -1257,9 +1325,12 @@ class ScraplingMCPServer:
             if not self._auth_token and allow_unauthenticated:
                 log.warning(
                     f"The MCP server is running over HTTP without authentication, so anyone who can reach "
-                    f"{host}:{port} can use every tool, including fetching arbitrary URLs from this machine."
+                    f"{host}:{port} can use every tool, although served outbound HTTP targets and browser tools are now restricted by default."
                 )
 
+        # Activate target/redirect and browser restrictions before exposing any
+        # official MCP transport. An empty target allowlist denies outbound tools.
+        self._served = True
         server = self._build_server(host, port)
         if http:
             server.run(

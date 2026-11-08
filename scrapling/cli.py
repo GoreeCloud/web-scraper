@@ -181,16 +181,46 @@ def install(force):  # pragma: no cover
     "(repeatable). Required when the server listens on a non-loopback address",
 )
 @option(
+    "--allowed-target-origin",
+    "allowed_target_origins",
+    type=str,
+    multiple=True,
+    help="Allow only this exact HTTP(S) origin for outbound MCP HTTP tools (e.g., 'https://example.org'). "
+    "Repeat for each authorized origin. Without any entries, served tools cannot fetch external URLs",
+)
+@option(
+    "--allow-loopback-targets",
+    is_flag=True,
+    default=False,
+    help="Explicitly permit allowlisted 127.0.0.1/::1 destinations, only with a loopback MCP listener",
+)
+@option(
+    "--unsafe-allow-browser-tools",
+    is_flag=True,
+    default=False,
+    help="Opt into browser MCP tools that do not have complete destination/subresource confinement; "
+    "never use with untrusted clients. Non-loopback HTTP listeners reject this option",
+)
+@option(
     "--no-auth",
     is_flag=True,
     default=False,
     help="Serve the streamable-http transport without authentication (not recommended). Without it, `--http` "
     "refuses to start unless a token is given; anonymous HTTP is restricted to loopback",
 )
-def mcp(http, host, port, executable_path, auth_token, allowed_host, no_auth):
+def mcp(http, host, port, executable_path, auth_token, allowed_host, allowed_target_origins, allow_loopback_targets, unsafe_allow_browser_tools, no_auth):
     from scrapling.core.ai import ScraplingMCPServer
 
-    server = ScraplingMCPServer(executable_path=executable_path, auth_token=auth_token)
+    try:
+        server = ScraplingMCPServer(
+            executable_path=executable_path,
+            auth_token=auth_token,
+            allowed_target_origins=allowed_target_origins,
+            allow_loopback_targets=allow_loopback_targets,
+            enable_unrestricted_browser_tools=unsafe_allow_browser_tools,
+        )
+    except ValueError as e:
+        raise UsageError(str(e)) from e
     try:
         server.serve(http, host, port, allowed_hosts=allowed_host, allow_unauthenticated=no_auth)
     except ValueError as e:
