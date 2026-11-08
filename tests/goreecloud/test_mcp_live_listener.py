@@ -330,3 +330,50 @@ async def test_live_protocol_session_cap_and_close_reopens_capacity(tmp_path):
                 assert admitted.status_code == 200, (admitted.status_code, admitted.text[:250])
                 assert admitted.headers.get("mcp-session-id") not in ids
             assert proc.poll() is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="The isolated MCP subprocess test currently supports POSIX")
+@pytest.mark.asyncio
+async def test_live_mcp_header_budget_and_recovery(tmp_path):
+    """An owned authenticated TCP listener must emit 431 before MCP work."""
+    from scrapling.core.ai._header_limit import MAX_MCP_HEADER_BYTES, MAX_MCP_HEADER_FIELDS
+
+    with _owned_target() as target_port:
+        port = _free_loopback_port()
+        token = secrets.token_urlsafe(24)
+        with _owned_mcp_listener(tmp_path, port, target_port, token) as proc:
+            await _wait_for_listener(proc, port)
+            endpoint = f"http://127.0.0.1:{port}/mcp"
+            base = {
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "MCP-Protocol-Version": "2025-06-18",
+            }
+            ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+            async with httpx2.AsyncClient(trust_env=False, timeout=10) as client:
+                # No bearer is supplied here: the bound ASGI middleware rejects
+                # oversized headers before authentication/tool dispatch.
+                huge = await client.post(
+                    endpoint, headers={**base, "X-Large": "X" * MAX_MCP_HEADER_BYTES},
+                    json=ping,
+                )
+                assert huge.status_code == 431, (huge.status_code, huge.text[:250])
+
+                many_headers = {f"X-Count-{i:03d}": "v" for i in range(MAX_MCP_HEADER_FIELDS + 2)}
+                excess = await client.post(
+                    endpoint,
+                    headers={**base, "Authorization": f"Bearer {token}", **many_headers},
+                    json=ping,
+                )
+                assert excess.status_code == 431, (excess.status_code, excess.text[:250])
+
+            async with httpx2.AsyncClient(
+                trust_env=False, timeout=10,
+                headers={"Authorization": f"Bearer {token}"},
+            ) as http_client:
+                async with streamable_http_client(endpoint, http_client=http_client) as streams:
+                    async with ClientSession(*streams) as session:
+                        initialized = await session.initialize()
+                        assert initialized.server_info.name == "GoreeCloud Web Scraper"
+            assert proc.poll() is None

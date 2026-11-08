@@ -9,6 +9,7 @@ from math import isfinite
 from ipaddress import ip_address
 from urllib.parse import urlencode
 from ._target_policy import AuthorizedTarget, MCPDestinationPolicy
+from ._header_limit import MCPHeaderBudget
 from functools import wraps
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -226,6 +227,15 @@ class _StaticTokenVerifier(TokenVerifier):
         if compare_digest(token.encode(), self._token):
             return AccessToken(token=token, client_id="scrapling-mcp", scopes=[])
         return None
+
+
+class _HeaderBoundedMCPServer(MCPServer):
+    """Wrap only the SDK-built streamable-HTTP ASGI app with header budgets."""
+
+    def streamable_http_app(self, **kwargs: Any):
+        app = super().streamable_http_app(**kwargs)
+        app.add_middleware(MCPHeaderBudget)
+        return app
 
 
 def _bounded_served_http(tool: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -1358,7 +1368,7 @@ class ScraplingMCPServer:
                 validate_token_resource=False,
             )
 
-        server = MCPServer(name="GoreeCloud Web Scraper", **settings)
+        server = _HeaderBoundedMCPServer(name="GoreeCloud Web Scraper", **settings)
         # Session management tools
         server.add_tool(
             _mcp_tool(self.browser_open),
