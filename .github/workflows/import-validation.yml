@@ -81,7 +81,7 @@ jobs:
           python -m pip install "${wheel}[ai]" pytest pytest-asyncio pytest-httpbin
           python -m pip check
       - name: Run MCP transport and authentication tests (in-memory ASGI, no listeners)
-        run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py
+        run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py
       - name: Verify inherited MCP auth and metadata regressions
         run: |
           python -m pytest -q -o addopts='' tests/ai/test_ai_mcp.py             -k 'TestStaticTokenVerifier or TestMCPServerAuthentication or test_server_metadata_and_tool_annotations'
