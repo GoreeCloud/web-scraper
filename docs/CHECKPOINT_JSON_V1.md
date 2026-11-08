@@ -27,7 +27,15 @@ Checkpoints can hold sensitive URL paths, request headers, cookies, form inputs 
 
 Before migration, **stop** the original crawl and back up the entire crawl directory. Only consider migrating a checkpoint created by the owner in a trusted, private directory. The inherited restricted pickle reader **still uses pickle** and is not a safe parser for stranger-provided bytes. The codec does **not** automatically load pickle in JSON mode.
 
-For an offline, previously trusted local checkpoint, use a reviewed one-time script that reads the old state with `CheckpointManager(...)`, verifies it returned a non-null `CheckpointData`, and writes the separate file with `CheckpointManager(..., checkpoint_format="json_v1")`. Verify restored requests, fingerprints, callback names and any custom metadata **without contacting external targets**. Compare old checkpoint SHA-256 before/after; preserve the original `checkpoint.pkl` for rollback. If the selected JSON file already exists, preserve it rather than overwriting it as part of migration.
+For a **stopped** crawl with a previously trusted local checkpoint, use the source-controlled migration module from a compatible installed GoreeCloud Web Scraper environment:
+
+~~~sh
+python -m scrapling.spiders.checkpoint_migrate --crawl-dir /private/mycrawl --confirm-trusted-local-file
+# Inspect the read-only summary. Then explicitly publish a distinct JSON file:
+python -m scrapling.spiders.checkpoint_migrate --crawl-dir /private/mycrawl --confirm-trusted-local-file --write
+~~~
+
+The required affirmative flag is mandatory even for a dry run: **reading legacy pickle bytes is not safe for strangers' files**. A write validates one legacy snapshot via the existing restricted reader and JSON codec, refuses any existing JSON output (including symlinks), checks the source remains unchanged, and publishes a new file through a private, fsynced temporary inode and atomic no-clobber hard link. Filesystems lacking hard-link support fail closed. The module verifies the published output by readback and leaves the original legacy pickle untouched for rollback. No scraper network requests occur. Independently validate restored requests, fingerprints, callbacks and custom metadata in a separate test crawl.
 
 Do not migrate while a spider is running, do not treat the conversion as verification of unknown downloaded pickle files, and do not delete the legacy file until a subsequent explicit recovery decision. If a Request contains custom Python or unsupported payload types, JSON v1 deliberately fails; preserve your old format and design an explicit, tested adapter before migrating.
 

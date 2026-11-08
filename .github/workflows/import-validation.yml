@@ -53,7 +53,7 @@ jobs:
           test -n "$wheel"
           python -m pip install "${wheel}[fetchers]"
       - name: Test imported parser and checkpoint behavior
-        run: python -m pytest -q -o addopts='' tests/parser tests/spiders/test_checkpoint.py tests/goreecloud/test_checkpoint_safety.py tests/goreecloud/test_checkpoint_json.py tests/goreecloud/test_loopback_http.py tests/goreecloud/test_browser_privacy.py tests/goreecloud/test_browser_sandbox.py
+        run: python -m pytest -q -o addopts='' tests/parser tests/spiders/test_checkpoint.py tests/goreecloud/test_checkpoint_safety.py tests/goreecloud/test_checkpoint_json.py tests/goreecloud/test_checkpoint_migrate.py tests/goreecloud/test_loopback_http.py tests/goreecloud/test_browser_privacy.py tests/goreecloud/test_browser_sandbox.py
       - name: Smoke test branded CLI help and version
         run: |
           goreecloud-web-scraper --help > /dev/null

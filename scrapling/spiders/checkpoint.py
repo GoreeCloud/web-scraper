@@ -75,9 +75,9 @@ def _read_checkpoint_bytes(path: Path) -> bytes:
     return content
 
 
-def _read_checkpoint(path: Path) -> CheckpointData:
-    """Read the inherited restricted legacy pickle checkpoint."""
-    source = io.BytesIO(_read_checkpoint_bytes(path))
+def _decode_legacy_checkpoint_bytes(raw: bytes) -> CheckpointData:
+    """Validate a previously read local pickle byte snapshot; never trust external files."""
+    source = io.BytesIO(raw)
     data = _RestrictedCheckpointUnpickler(source).load()
     if source.read(1):
         # A valid checkpoint is exactly one pickle stream. Do not silently
@@ -123,6 +123,11 @@ def _read_checkpoint(path: Path) -> CheckpointData:
         ):
             raise ValueError("Checkpoint callback name is invalid")
     return data
+
+
+def _read_checkpoint(path: Path) -> CheckpointData:
+    """Read the inherited restricted legacy pickle checkpoint."""
+    return _decode_legacy_checkpoint_bytes(_read_checkpoint_bytes(path))
 
 
 def _atomic_checkpoint_write(path: Path, data: bytes) -> None:
