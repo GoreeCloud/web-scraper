@@ -5,7 +5,9 @@ from os import environ
 from json import dumps
 from time import monotonic
 from hmac import compare_digest
+from math import isfinite
 from ipaddress import ip_address
+from urllib.parse import urlencode
 from ._target_policy import AuthorizedTarget, MCPDestinationPolicy
 from functools import wraps
 from contextlib import contextmanager
@@ -74,6 +76,11 @@ SessionExtractionType = Literal[extraction_types, "snapshot"]
 ScreenshotType = Literal["png", "jpeg"]
 MCP_EXECUTABLE_PATH_ENV = "SCRAPLING_EXECUTABLE_PATH"
 MCP_AUTH_TOKEN_ENV = "SCRAPLING_MCP_AUTH_TOKEN"  # nosec B105 - the name of the variable, not a token
+# Served MCP HTTP tools are not general-purpose bulk download endpoints.
+MCP_MAX_HTTP_REQUEST_BYTES = 1 * 1024 * 1024
+MCP_MAX_HTTP_RESPONSE_BYTES = 4 * 1024 * 1024
+MCP_MIN_HTTP_TIMEOUT_SECONDS = 0.1  # Avoid submillisecond libcurl timeout rounding to zero.
+MCP_MAX_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _typed_dict_keys(typed_dict: Any) -> frozenset:
@@ -310,6 +317,47 @@ class ScraplingMCPServer:
             raise RuntimeError("No active HTTP client available for destination pinning")
         client.trust_env = False
         client.curl_options[CurlOpt.RESOLVE] = [authorized.curl_resolve_entry()]
+        # libcurl enforces this both with Content-Length and for streamed/chunked
+        # bodies; the owned-fixture tests cover compressed bodies as well.
+        client.curl_options[CurlOpt.MAXFILESIZE_LARGE] = MCP_MAX_HTTP_RESPONSE_BYTES
+
+    @staticmethod
+    def _served_http_budget(timeout: Optional[int | float]) -> float:
+        """Reject unbounded/timeouts before contacting a served MCP destination."""
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not isfinite(timeout)
+            or not MCP_MIN_HTTP_TIMEOUT_SECONDS <= timeout <= MCP_MAX_HTTP_TIMEOUT_SECONDS
+        ):
+            raise ValueError("Served MCP HTTP timeout must be between 0.1 and 30 seconds")
+        return float(timeout)
+
+    @staticmethod
+    def _served_http_upload_budget(
+        method: SUPPORTED_HTTP_METHODS,
+        data: Optional[Dict[str, str] | str],
+        json_body: Optional[Dict | List],
+    ) -> None:
+        """Limit outbound form/JSON bytes before constructing an HTTP session."""
+        if method == "GET":
+            return
+        if json_body is not None:
+            payload = dumps(json_body, ensure_ascii=False).encode("utf-8")
+        elif isinstance(data, dict):
+            payload = urlencode(data, doseq=True).encode("utf-8")
+        elif isinstance(data, str):
+            payload = data.encode("utf-8")
+        else:
+            return
+        if len(payload) > MCP_MAX_HTTP_REQUEST_BYTES:
+            raise ValueError("Served MCP HTTP request body exceeds the 1 MiB upload budget")
+
+    @staticmethod
+    def _served_http_response(page: _ScraplingResponse) -> None:
+        """Check decoded response size before expensive content extraction."""
+        if len(page.body) > MCP_MAX_HTTP_RESPONSE_BYTES:
+            raise ValueError("Served MCP HTTP response exceeds the 4 MiB body budget")
 
     def _resolve_executable_path(self, executable_path: Optional[str]) -> Optional[str]:
         """Return a per-call executable path or the server-wide default."""
@@ -842,6 +890,12 @@ class ScraplingMCPServer:
         )
         if self._served and proxy_auth:
             raise ValueError("Proxy authentication is forbidden for served MCP requests")
+        if pinned_target is not None:
+            timeout = self._served_http_budget(timeout)
+            self._served_http_upload_budget(method, data, json)
+            retries = 1
+            retry_delay = 0
+            max_redirects = 0
         normalized_proxy_auth = _normalize_credentials(proxy_auth)
         normalized_auth = _normalize_credentials(auth)
 
@@ -869,6 +923,8 @@ class ScraplingMCPServer:
             if pinned_target is not None:
                 self._pin_curl_destination(session, pinned_target)
             page = await getattr(session, method.lower())(url, **request_kwargs)
+            if pinned_target is not None:
+                self._served_http_response(page)
             return _translate_response(page, extraction_type, css_selector, main_content_only)
 
     async def browser_fetch_once(
@@ -1097,6 +1153,12 @@ class ScraplingMCPServer:
             url, follow_redirects=follow_redirects, verify=verify, headers=headers, http3=http3
         )
 
+        if pinned_target is not None:
+            timeout = self._served_http_budget(timeout)
+            self._served_http_upload_budget(method, data, json)
+            retries = 1
+            retry_delay = 0
+            max_redirects = 0
         request_kwargs: Dict[str, Any] = dict(
             auth=_normalize_credentials(auth),
             http3=http3,
@@ -1122,6 +1184,8 @@ class ScraplingMCPServer:
             async with self._served_http_lock:
                 self._pin_curl_destination(entry.session._client, pinned_target)
                 page = await getattr(entry.session._client, method.lower())(url, **request_kwargs)
+        if pinned_target is not None:
+            self._served_http_response(page)
         return _translate_response(page, extraction_type, css_selector, main_content_only)
 
     @staticmethod

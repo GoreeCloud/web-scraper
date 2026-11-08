@@ -7,6 +7,8 @@ This validates a policy preflight, not kernel-level egress confinement.
 from __future__ import annotations
 
 import socket
+import gzip
+from math import inf, nan
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -15,12 +17,15 @@ from types import SimpleNamespace
 
 import pytest
 from curl_cffi import CurlOpt
+from curl_cffi.curl import CurlError
 from click.testing import CliRunner
 from mcp.server import MCPServer
 
 from scrapling.cli import mcp
 from scrapling.core.ai._target_policy import AuthorizedTarget, MCPDestinationPolicy
-from scrapling.core.ai.server import ScraplingMCPServer
+from scrapling.core.ai.server import (
+    ScraplingMCPServer, MCP_MAX_HTTP_RESPONSE_BYTES, MCP_MAX_HTTP_TIMEOUT_SECONDS,
+)
 
 
 def _dns(host, port, family, socket_type):
@@ -254,6 +259,7 @@ def test_curl_destination_pin_uses_reviewed_ip_and_disables_environment_proxies(
     ScraplingMCPServer._pin_curl_destination(session, target)
     assert curl.trust_env is False
     assert curl.curl_options[CurlOpt.RESOLVE] == ["example.org:443:93.184.216.34"]
+    assert curl.curl_options[CurlOpt.MAXFILESIZE_LARGE] == 4 * 1024 * 1024
 
 
 def test_ipv6_curl_resolve_entries_are_bracketed():
@@ -359,3 +365,151 @@ async def test_served_mcp_http3_refused_before_connect():
         with pytest.raises(ValueError, match="HTTP/3"):
             await server.make_request("https://example.org", http3=True)
         session.assert_not_called()
+
+class _OversizeFixture(BaseHTTPRequestHandler):
+    def do_GET(self):
+        large = b"X" * (MCP_MAX_HTTP_RESPONSE_BYTES + 1)
+        if self.path == "/gzip":
+            data = gzip.compress(large)
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if self.path == "/chunked":
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                for i in range(0, len(large), 16384):
+                    part = large[i:i + 16384]
+                    self.wfile.write(format(len(part), "x").encode() + b"\r\n" + part + b"\r\n")
+                self.wfile.write(b"0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(large)))
+        self.end_headers()
+        try:
+            self.wfile.write(large)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *_):
+        return
+
+
+@contextmanager
+def _oversize_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OversizeFixture)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/fixed", "/chunked", "/gzip"])
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_owned_oversize_http_body_is_rejected_by_curl_limit(path, persistent, monkeypatch):
+    # No public requests; the response body is slightly larger than the
+    # governed 4MiB budget, including gzip decompression in /gzip.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with _oversize_server() as port:
+        url = f"http://127.0.0.1:{port}{path}"
+        server = ScraplingMCPServer(
+            allowed_target_origins=(f"http://127.0.0.1:{port}",),
+            allow_loopback_targets=True,
+        )
+        server._served = True
+        if persistent:
+            await server.open_request_session(session_id="large", impersonate=None)
+        try:
+            with pytest.raises(CurlError, match="Maximum file size|maximum allowed file size|max file size"):
+                if persistent:
+                    await server.session_make_request(
+                        url=url, session_id="large", retries=100000,
+                        timeout=5, stealthy_headers=False,
+                    )
+                else:
+                    await server.make_request(
+                        url=url, impersonate=None, retries=100000,
+                        timeout=5, stealthy_headers=False,
+                    )
+        finally:
+            if persistent:
+                await server.close_session("large")
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 0.00001, -1, 31, inf, nan, True, "30"])
+def test_served_http_timeout_cannot_be_unbounded(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        ScraplingMCPServer._served_http_budget(timeout)
+
+
+def test_served_http_timeout_accepts_positive_at_most_30():
+    assert ScraplingMCPServer._served_http_budget(0.1) == 0.1
+    assert ScraplingMCPServer._served_http_budget(30) == MCP_MAX_HTTP_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_invalid_served_timeout_refused_before_http_session_creation():
+    server = ScraplingMCPServer(
+        allowed_target_origins=("http://127.0.0.1:8123",), allow_loopback_targets=True,
+    )
+    server._served = True
+    with patch("scrapling.core.ai.server.FetcherSession") as session:
+        with pytest.raises(ValueError, match="timeout"):
+            await server.make_request("http://127.0.0.1:8123", timeout=None)
+        session.assert_not_called()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["form", "json", "raw"])
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_large_post_bodies_rejected_before_fetch_session(kind, persistent):
+    server = ScraplingMCPServer(
+        allowed_target_origins=("http://127.0.0.1:8123",), allow_loopback_targets=True
+    )
+    server._served = True
+    large = "x" * (1024 * 1024 + 1)
+    params = (
+        {"data": {"field": large}} if kind == "form"
+        else {"json": {"field": large}} if kind == "json"
+        else {"data": large}
+    )
+    if persistent:
+        await server.open_request_session(session_id="test-body-cap", impersonate=None)
+        try:
+            with patch.object(type(server._sessions["test-body-cap"].session._client), "post") as transport:
+                with pytest.raises(ValueError, match="1 MiB"):
+                    await server.session_make_request(
+                        url="http://127.0.0.1:8123", session_id="test-body-cap",
+                        method="POST", **params,
+                    )
+                transport.assert_not_called()
+        finally:
+            await server.close_session("test-body-cap")
+    else:
+        with patch("scrapling.core.ai.server.FetcherSession") as transport:
+            with pytest.raises(ValueError, match="1 MiB"):
+                await server.make_request(
+                    url="http://127.0.0.1:8123", method="POST", **params
+                )
+            transport.assert_not_called()
+
+
+def test_mcp_post_upload_accepts_small_payload_without_network():
+    assert ScraplingMCPServer._served_http_upload_budget("POST", {"a": "hello"}, None) is None
+    assert ScraplingMCPServer._served_http_upload_budget("POST", None, {"a": [1, 2]}) is None
