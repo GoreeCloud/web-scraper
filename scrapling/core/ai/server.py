@@ -87,6 +87,7 @@ MCP_MAX_HTTP_OUTPUT_BYTES = 256 * 1024
 MCP_MAX_HTTP_METADATA_BYTES = 32 * 1024
 MCP_MAX_HTTP_CALLS_PER_MINUTE = 60
 MCP_HTTP_RATE_WINDOW_SECONDS = 60.0
+MCP_MAX_HTTP_OPERATION_SECONDS = 35.0
 MCP_MIN_HTTP_TIMEOUT_SECONDS = 0.1  # Avoid submillisecond libcurl timeout rounding to zero.
 MCP_MAX_HTTP_TIMEOUT_SECONDS = 30.0
 
@@ -237,9 +238,19 @@ def _bounded_served_http(tool: Callable[..., Awaitable[Any]]) -> Callable[..., A
             ) from error
         try:
             await self._served_http_rate_budget()
-            result = await tool(self, *args, **kwargs)
-            self._served_http_output_budget(result)
-            return result
+
+            async def execute_with_output_budget() -> Any:
+                result = await tool(self, *args, **kwargs)
+                self._served_http_output_budget(result)
+                return result
+
+            try:
+                return await wait_for(execute_with_output_budget(), timeout=MCP_MAX_HTTP_OPERATION_SECONDS)
+            except AsyncTimeoutError as error:
+                raise ValueError(
+                    f"Served MCP HTTP operation exceeded the {MCP_MAX_HTTP_OPERATION_SECONDS:g}-second "
+                    "async budget (including destination checks, HTTP transfer and extraction)"
+                ) from error
         finally:
             self._served_http_slots.release()
     return wrapped
