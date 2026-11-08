@@ -194,6 +194,30 @@ def test_serve_enables_policy_without_opening_network_listener():
     run.assert_called_once()
 
 
+def test_supported_mcp_http_runner_forwards_transport_ingress_limits():
+    # Read-only mock: no bound listener or external traffic. These are SDK
+    # *protocol* sessions, distinct from the eight application HTTP sessions.
+    from scrapling.core.ai.server import (
+        MCP_MAX_INBOUND_HTTP_BYTES,
+        MCP_MAX_PROTOCOL_SESSIONS,
+        MCP_PROTOCOL_IDLE_TIMEOUT_SECONDS,
+    )
+    server = ScraplingMCPServer()
+    with patch.object(MCPServer, "run") as run:
+        server.serve(http=True, host="127.0.0.1", port=8123, allow_unauthenticated=True)
+    options = run.call_args.kwargs
+    assert options["max_request_body_size"] == MCP_MAX_INBOUND_HTTP_BYTES == 256 * 1024
+    assert options["max_sessions"] == MCP_MAX_PROTOCOL_SESSIONS == 8
+    assert options["session_idle_timeout"] == MCP_PROTOCOL_IDLE_TIMEOUT_SECONDS == 300.0
+    assert options["transport"] == "streamable-http"
+
+    direct = ScraplingMCPServer()
+    with patch.object(MCPServer, "run") as run:
+        direct.serve(http=False, host="127.0.0.1", port=8123)
+    assert run.call_args.args == ()
+    assert run.call_args.kwargs == {}
+
+
 def test_refuse_unrestricted_browser_or_loopback_target_on_external_bind():
     with patch.object(MCPServer, "run") as run:
         with pytest.raises(ValueError, match="Unrestricted browser"):

@@ -88,6 +88,10 @@ MCP_MAX_HTTP_METADATA_BYTES = 32 * 1024
 MCP_MAX_HTTP_CALLS_PER_MINUTE = 60
 MCP_HTTP_RATE_WINDOW_SECONDS = 60.0
 MCP_MAX_HTTP_OPERATION_SECONDS = 35.0
+# Separate MCP *transport* protocol quotas (not browser/HTTP data sessions).
+MCP_MAX_INBOUND_HTTP_BYTES = 256 * 1024
+MCP_MAX_PROTOCOL_SESSIONS = 8
+MCP_PROTOCOL_IDLE_TIMEOUT_SECONDS = 300.0
 MCP_MIN_HTTP_TIMEOUT_SECONDS = 0.1  # Avoid submillisecond libcurl timeout rounding to zero.
 MCP_MAX_HTTP_TIMEOUT_SECONDS = 30.0
 
@@ -1544,6 +1548,9 @@ class ScraplingMCPServer:
                 host=host,
                 port=port,
                 transport_security=self._transport_security(effective_hosts),
+                max_request_body_size=MCP_MAX_INBOUND_HTTP_BYTES,
+                max_sessions=MCP_MAX_PROTOCOL_SESSIONS,
+                session_idle_timeout=MCP_PROTOCOL_IDLE_TIMEOUT_SECONDS,
             )
         else:
             server.run()

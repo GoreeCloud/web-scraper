@@ -231,3 +231,102 @@ async def test_live_authenticated_mcp_listener_and_allowed_owned_target(tmp_path
                         })
                         assert not closed.is_error
         assert proc.poll() is not None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="The isolated MCP subprocess test currently supports POSIX")
+@pytest.mark.asyncio
+async def test_live_mcp_ingress_rejects_large_declared_and_chunked_bodies_and_recovers(tmp_path):
+    """SDK middleware must return 413 before JSON/tool work, including chunked uploads."""
+    from scrapling.core.ai.server import MCP_MAX_INBOUND_HTTP_BYTES
+
+    with _owned_target() as target_port:
+        port = _free_loopback_port()
+        token = secrets.token_urlsafe(24)
+        with _owned_mcp_listener(tmp_path, port, target_port, token) as proc:
+            await _wait_for_listener(proc, port)
+            endpoint = f"http://127.0.0.1:{port}/mcp"
+            headers = {
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+                "MCP-Protocol-Version": "2025-06-18",
+            }
+            padded = b'{"jsonrpc":"2.0","id":1,"method":"ping","padding":"' + (
+                b"x" * MCP_MAX_INBOUND_HTTP_BYTES
+            ) + b'"}'
+            assert len(padded) > MCP_MAX_INBOUND_HTTP_BYTES
+
+            async def streamed_chunks():
+                for offset in range(0, len(padded), 8192):
+                    yield padded[offset:offset + 8192]
+
+            async with httpx2.AsyncClient(trust_env=False, timeout=10) as client:
+                declared = await client.post(endpoint, headers=headers, content=padded)
+                assert declared.status_code == 413
+                streamed = await client.post(
+                    endpoint, headers=headers,
+                    content=streamed_chunks(),
+                )
+                assert streamed.status_code == 413
+
+            # Oversized requests must not kill the isolated process or poison
+            # future authenticated MCP handshakes.
+            async with httpx2.AsyncClient(
+                trust_env=False,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            ) as http_client:
+                async with streamable_http_client(endpoint, http_client=http_client) as streams:
+                    async with ClientSession(*streams) as session:
+                        initialized = await session.initialize()
+                        assert initialized.server_info.name == "GoreeCloud Web Scraper"
+            assert proc.poll() is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="The isolated MCP subprocess test currently supports POSIX")
+@pytest.mark.asyncio
+async def test_live_protocol_session_cap_and_close_reopens_capacity(tmp_path):
+    """Real MCP initializations use bounded SDK protocol sessions (not tool HTTP sessions)."""
+    from scrapling.core.ai.server import MCP_MAX_PROTOCOL_SESSIONS
+
+    with _owned_target() as target_port:
+        port = _free_loopback_port()
+        token = secrets.token_urlsafe(24)
+        with _owned_mcp_listener(tmp_path, port, target_port, token) as proc:
+            await _wait_for_listener(proc, port)
+            endpoint = f"http://127.0.0.1:{port}/mcp"
+            headers = {
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+                "MCP-Protocol-Version": "2025-06-18",
+            }
+            request = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "owned-protocol-cap-test", "version": "0.1"},
+                },
+            }
+            async with httpx2.AsyncClient(trust_env=False, timeout=10) as client:
+                ids = []
+                for _ in range(MCP_MAX_PROTOCOL_SESSIONS):
+                    result = await client.post(endpoint, headers=headers, json=request)
+                    assert result.status_code == 200, (result.status_code, result.text[:250])
+                    sid = result.headers.get("mcp-session-id")
+                    assert sid and sid not in ids
+                    ids.append(sid)
+
+                refused = await client.post(endpoint, headers=headers, json=request)
+                assert refused.status_code == 503, (refused.status_code, refused.text[:250])
+                freed = await client.delete(
+                    endpoint, headers={**headers, "mcp-session-id": ids[0]}
+                )
+                assert freed.status_code in (200, 204), (freed.status_code, freed.text[:250])
+                admitted = await client.post(endpoint, headers=headers, json=request)
+                assert admitted.status_code == 200, (admitted.status_code, admitted.text[:250])
+                assert admitted.headers.get("mcp-session-id") not in ids
+            assert proc.poll() is None
