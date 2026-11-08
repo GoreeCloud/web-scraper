@@ -14,14 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 commit verified 2026-11-08
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 commit verified 2026-11-08
         with:
           python-version: '3.12'
       - name: Import and license integrity
         run: python scripts/verify_import.py
+      - name: Verify GitHub Actions immutable action pins
+        run: |
+          python scripts/test_workflow_action_pins.py
+          python scripts/check_workflow_action_pins.py
       - name: Compile Python source
         run: python -m compileall -q scrapling goreecloud_web_scraper scripts
 
@@ -33,10 +37,10 @@ jobs:
       matrix:
         python-version: ['3.10', '3.12', '3.13']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 commit verified 2026-11-08
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 commit verified 2026-11-08
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install build and test tools
@@ -64,10 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 commit verified 2026-11-08
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 commit verified 2026-11-08
         with:
           python-version: '3.12'
       - name: Install build tools
@@ -128,10 +132,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 commit verified 2026-11-08
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 commit verified 2026-11-08
         with:
           python-version: '3.12'
       - name: Install build tools
