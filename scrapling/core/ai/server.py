@@ -1,5 +1,5 @@
 import re
-from asyncio import CancelledError, Lock, create_task, shield, sleep
+from asyncio import CancelledError, Lock, Semaphore, TimeoutError as AsyncTimeoutError, create_task, shield, sleep, wait_for
 from uuid import uuid4
 from os import environ
 from json import dumps
@@ -78,6 +78,9 @@ MCP_EXECUTABLE_PATH_ENV = "SCRAPLING_EXECUTABLE_PATH"
 MCP_AUTH_TOKEN_ENV = "SCRAPLING_MCP_AUTH_TOKEN"  # nosec B105 - the name of the variable, not a token
 # Served MCP HTTP tools are not general-purpose bulk download endpoints.
 MCP_MAX_HTTP_REQUEST_BYTES = 1 * 1024 * 1024
+MCP_MAX_ACTIVE_SESSIONS = 8
+MCP_MAX_CONCURRENT_HTTP_CALLS = 4
+MCP_HTTP_ADMISSION_WAIT_SECONDS = 0.25
 MCP_MAX_HTTP_RESPONSE_BYTES = 4 * 1024 * 1024
 MCP_MIN_HTTP_TIMEOUT_SECONDS = 0.1  # Avoid submillisecond libcurl timeout rounding to zero.
 MCP_MAX_HTTP_TIMEOUT_SECONDS = 30.0
@@ -215,6 +218,25 @@ class _StaticTokenVerifier(TokenVerifier):
         return None
 
 
+def _bounded_served_http(tool: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """Bound in-flight official MCP HTTP tools without changing library callers."""
+    @wraps(tool)
+    async def wrapped(self: "ScraplingMCPServer", *args: Any, **kwargs: Any) -> Any:
+        if not self._served:
+            return await tool(self, *args, **kwargs)
+        try:
+            await wait_for(self._served_http_slots.acquire(), MCP_HTTP_ADMISSION_WAIT_SECONDS)
+        except AsyncTimeoutError as error:
+            raise ValueError(
+                f"Served MCP HTTP concurrency budget exhausted (max {MCP_MAX_CONCURRENT_HTTP_CALLS})"
+            ) from error
+        try:
+            return await tool(self, *args, **kwargs)
+        finally:
+            self._served_http_slots.release()
+    return wrapped
+
+
 def _mcp_tool(tool: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     @wraps(tool)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -268,6 +290,9 @@ class ScraplingMCPServer:
         self._targets = MCPDestinationPolicy(tuple(allowed_target_origins), allow_loopback_targets)
         self._enable_unrestricted_browser_tools = enable_unrestricted_browser_tools
         self._served_http_lock = Lock()
+        self._session_admission_lock = Lock()
+        self._pending_session_ids: set[str] = set()
+        self._served_http_slots = Semaphore(MCP_MAX_CONCURRENT_HTTP_CALLS)
 
     def _require_browser_tool(self) -> None:
         if self._served and not self._enable_unrestricted_browser_tools:
@@ -386,6 +411,21 @@ class ScraplingMCPServer:
             )
         return session_id
 
+    async def _admit_session(self, requested_id: Optional[str]) -> str:
+        """Reserve capacity before awaiting a connection/browser startup."""
+        if not self._served:
+            return self._new_session_id(requested_id)
+        async with self._session_admission_lock:
+            if len(self._sessions) + len(self._pending_session_ids) >= MCP_MAX_ACTIVE_SESSIONS:
+                raise ValueError(
+                    f"Served MCP session budget exhausted (max {MCP_MAX_ACTIVE_SESSIONS})"
+                )
+            session_id = self._new_session_id(requested_id)
+            if session_id in self._pending_session_ids:
+                raise ValueError(f"Session '{session_id}' is already starting")
+            self._pending_session_ids.add(session_id)
+            return session_id
+
     def _register_session(self, session_id: str, session: Any, session_type: SessionType) -> SessionCreatedModel:
         """Store a started session and build its creation receipt."""
         self._sessions[session_id] = _SessionEntry(session=session, session_type=session_type)
@@ -441,32 +481,36 @@ class ScraplingMCPServer:
     ) -> SessionCreatedModel:
         """Open a reusable local or remote browser session. Pass per-request options to `browser_fetch`."""
         self._require_browser_tool()
-        session_id = self._new_session_id(session_id)
-        options: Dict[str, Any] = dict(
-            proxy=proxy,
-            locale=locale,
-            cookies=cookies,
-            block_ads=True,
-            record_requests=True,
-            useragent=useragent,
-            timezone_id=timezone_id,
-            additional_args=additional_args,
-        )
-        session = (
-            AsyncRemoteSession(cdp_url, new_context=new_context, **options)
-            if cdp_url is not None
-            else AsyncStealthySession(
-                headless=headless,
-                real_chrome=real_chrome,
-                executable_path=self._resolve_executable_path(executable_path),
-                hide_canvas=hide_canvas,
-                block_webrtc=block_webrtc,
-                allow_webgl=allow_webgl,
-                **options,
+        session_id = await self._admit_session(session_id)
+        try:
+            options: Dict[str, Any] = dict(
+                proxy=proxy,
+                locale=locale,
+                cookies=cookies,
+                block_ads=True,
+                record_requests=True,
+                useragent=useragent,
+                timezone_id=timezone_id,
+                additional_args=additional_args,
             )
-        )
-        await session.start()
-        return self._register_session(session_id, session, "stealthy")
+            session = (
+                AsyncRemoteSession(cdp_url, new_context=new_context, **options)
+                if cdp_url is not None
+                else AsyncStealthySession(
+                    headless=headless,
+                    real_chrome=real_chrome,
+                    executable_path=self._resolve_executable_path(executable_path),
+                    hide_canvas=hide_canvas,
+                    block_webrtc=block_webrtc,
+                    allow_webgl=allow_webgl,
+                    **options,
+                )
+            )
+            await session.start()
+            return self._register_session(session_id, session, "stealthy")
+
+        finally:
+            self._pending_session_ids.discard(session_id)
 
     async def browser_save_state(
         self,
@@ -511,12 +555,15 @@ class ScraplingMCPServer:
         ] = None,
     ) -> SessionCreatedModel:
         """Open a reusable HTTP session for `session_make_request`, keeping cookies, connections, and request settings."""
-        session_id = self._new_session_id(session_id)
         if self._served and proxy:
             raise ValueError("Persistent HTTP proxy is forbidden for served MCP sessions")
-        session = FetcherSession(impersonate=impersonate, proxy=proxy)
-        await session.__aenter__()
-        return self._register_session(session_id, session, "static")
+        session_id = await self._admit_session(session_id)
+        try:
+            session = FetcherSession(impersonate=impersonate, proxy=proxy)
+            await session.__aenter__()
+            return self._register_session(session_id, session, "static")
+        finally:
+            self._pending_session_ids.discard(session_id)
 
     async def close_session(
         self,
@@ -833,6 +880,7 @@ class ScraplingMCPServer:
                 )
             ]
 
+    @_bounded_served_http
     async def make_request(
         self,
         url: Annotated[str, Field(description="URL to fetch.")],
@@ -1106,6 +1154,7 @@ class ScraplingMCPServer:
             )
         return _translate_response(page, extraction_type, css_selector, main_content_only)
 
+    @_bounded_served_http
     async def session_make_request(
         self,
         url: Annotated[str, Field(description="URL to fetch.")],
