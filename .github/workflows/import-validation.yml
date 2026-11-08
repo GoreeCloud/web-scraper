@@ -119,6 +119,41 @@ jobs:
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as target:
               target.write(summary)
           PYINVENTORY
+      - name: Verify deterministic installed license artifacts (evidence only, nonpublishing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test_license_artifact_evidence.py
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          python scripts/generate_license_artifact_evidence.py --output "$work/licenses-first.json"
+          python scripts/generate_license_artifact_evidence.py --output "$work/licenses-second.json"
+          cmp "$work/licenses-first.json" "$work/licenses-second.json"
+          python - "$work/licenses-first.json" <<'PYEVIDENCE'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          data = Path(sys.argv[1]).read_bytes()
+          report = json.loads(data)
+          assert report["format"] == "GoreeCloud installed Python license-artifact evidence v1"
+          assert report["root_distribution"] == "goreecloud-web-scraper"
+          records = report["records"]
+          assert len(records) == len({(r["normalized_name"], r["version"]) for r in records})
+          files = [file for rec in records for file in rec["files"]]
+          assert all(len(file["sha256"]) == 64 and file["bytes"] <= 1048576 for file in files)
+          missing = sum(not rec["files"] for rec in records)
+          summary = (
+              f"Installed license-file evidence: {len(records)} Python distributions; "
+              f"{len(files)} hash-only license/notice artifacts; {missing} missing file evidence; "
+              f"SHA-256 {hashlib.sha256(data).hexdigest()}. "
+              "UNREVIEWED: not a full license/legal or dependency-graph clearance.\n"
+          )
+          print(summary)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as target:
+              target.write(summary)
+          PYEVIDENCE
       - name: Run MCP transport, destination and authenticated owned-loopback tests
         run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py tests/goreecloud/test_mcp_capacity.py tests/goreecloud/test_mcp_rate_output.py tests/goreecloud/test_mcp_total_budget.py
       - name: Verify inherited MCP auth and metadata regressions
