@@ -13,6 +13,7 @@ from functools import wraps
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from collections import deque
 
 from anyio import CancelScope
 from curl_cffi.curl import CurlError
@@ -82,6 +83,10 @@ MCP_MAX_ACTIVE_SESSIONS = 8
 MCP_MAX_CONCURRENT_HTTP_CALLS = 4
 MCP_HTTP_ADMISSION_WAIT_SECONDS = 0.25
 MCP_MAX_HTTP_RESPONSE_BYTES = 4 * 1024 * 1024
+MCP_MAX_HTTP_OUTPUT_BYTES = 256 * 1024
+MCP_MAX_HTTP_METADATA_BYTES = 32 * 1024
+MCP_MAX_HTTP_CALLS_PER_MINUTE = 60
+MCP_HTTP_RATE_WINDOW_SECONDS = 60.0
 MCP_MIN_HTTP_TIMEOUT_SECONDS = 0.1  # Avoid submillisecond libcurl timeout rounding to zero.
 MCP_MAX_HTTP_TIMEOUT_SECONDS = 30.0
 
@@ -231,7 +236,10 @@ def _bounded_served_http(tool: Callable[..., Awaitable[Any]]) -> Callable[..., A
                 f"Served MCP HTTP concurrency budget exhausted (max {MCP_MAX_CONCURRENT_HTTP_CALLS})"
             ) from error
         try:
-            return await tool(self, *args, **kwargs)
+            await self._served_http_rate_budget()
+            result = await tool(self, *args, **kwargs)
+            self._served_http_output_budget(result)
+            return result
         finally:
             self._served_http_slots.release()
     return wrapped
@@ -293,6 +301,8 @@ class ScraplingMCPServer:
         self._session_admission_lock = Lock()
         self._pending_session_ids: set[str] = set()
         self._served_http_slots = Semaphore(MCP_MAX_CONCURRENT_HTTP_CALLS)
+        self._served_http_rate_lock = Lock()
+        self._served_http_recent_calls: deque[float] = deque()
 
     def _require_browser_tool(self) -> None:
         if self._served and not self._enable_unrestricted_browser_tools:
@@ -377,6 +387,45 @@ class ScraplingMCPServer:
             return
         if len(payload) > MCP_MAX_HTTP_REQUEST_BYTES:
             raise ValueError("Served MCP HTTP request body exceeds the 1 MiB upload budget")
+
+    async def _served_http_rate_budget(self) -> None:
+        """One-process sliding-window admission before DNS or any outbound work."""
+        async with self._served_http_rate_lock:
+            now = monotonic()
+            recent = self._served_http_recent_calls
+            while recent and recent[0] <= now - MCP_HTTP_RATE_WINDOW_SECONDS:
+                recent.popleft()
+            if len(recent) >= MCP_MAX_HTTP_CALLS_PER_MINUTE:
+                raise ValueError(
+                    f"Served MCP HTTP rate budget exhausted (max {MCP_MAX_HTTP_CALLS_PER_MINUTE} calls per minute)"
+                )
+            recent.append(now)
+
+    @staticmethod
+    def _served_http_metadata_budget(
+        *,
+        params: Optional[Dict],
+        headers: Optional[Mapping[str, Optional[str]]],
+        cookies: Optional[Dict[str, str]],
+        auth: Optional[Dict[str, str]],
+    ) -> None:
+        """Bound served static request metadata without retaining sensitive values."""
+        try:
+            encoded = dumps(
+                {"params": params, "headers": headers, "cookies": cookies, "auth": auth},
+                ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("Served MCP request metadata must be JSON serializable") from error
+        if len(encoded) > MCP_MAX_HTTP_METADATA_BYTES:
+            raise ValueError("Served MCP HTTP request metadata exceeds the 32 KiB budget")
+
+    @staticmethod
+    def _served_http_output_budget(response: Any) -> None:
+        """Reject oversized serialized static HTTP tool results instead of truncating."""
+        if isinstance(response, ResponseModel):
+            if len(response.model_dump_json().encode("utf-8")) > MCP_MAX_HTTP_OUTPUT_BYTES:
+                raise ValueError("Served MCP HTTP extracted output exceeds the 256 KiB budget")
 
     @staticmethod
     def _served_http_response(page: _ScraplingResponse) -> None:
@@ -932,6 +981,8 @@ class ScraplingMCPServer:
         ] = True,
     ) -> ResponseModel:
         """Make an HTTP request without JavaScript. Suitable for low-to-mid protection."""
+        if self._served:
+            self._served_http_metadata_budget(params=params, headers=headers, cookies=cookies, auth=auth)
         follow_redirects, pinned_target = await self._require_static_target(
             url, follow_redirects=follow_redirects, verify=verify, proxy=proxy,
             headers=headers, http3=http3
@@ -1197,6 +1248,8 @@ class ScraplingMCPServer:
         ] = True,
     ) -> ResponseModel:
         """Make an HTTP request using the session's cookies, connections, impersonation, and proxy. Options apply to this request."""
+        if self._served:
+            self._served_http_metadata_budget(params=params, headers=headers, cookies=cookies, auth=auth)
         entry = self._get_session(session_id, expected_type=["static"])
         follow_redirects, pinned_target = await self._require_static_target(
             url, follow_redirects=follow_redirects, verify=verify, headers=headers, http3=http3
