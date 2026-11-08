@@ -11,13 +11,15 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
+from curl_cffi import CurlOpt
 from click.testing import CliRunner
 from mcp.server import MCPServer
 
 from scrapling.cli import mcp
-from scrapling.core.ai._target_policy import MCPDestinationPolicy
+from scrapling.core.ai._target_policy import AuthorizedTarget, MCPDestinationPolicy
 from scrapling.core.ai.server import ScraplingMCPServer
 
 
@@ -245,11 +247,30 @@ def _owned_http_server():
         thread.join(timeout=3)
 
 
+def test_curl_destination_pin_uses_reviewed_ip_and_disables_environment_proxies():
+    curl = SimpleNamespace(trust_env=True, curl_options={})
+    session = SimpleNamespace(_async_curl_session=curl)
+    target = AuthorizedTarget(hostname="example.org", port=443, address="93.184.216.34")
+    ScraplingMCPServer._pin_curl_destination(session, target)
+    assert curl.trust_env is False
+    assert curl.curl_options[CurlOpt.RESOLVE] == ["example.org:443:93.184.216.34"]
+
+
+def test_ipv6_curl_resolve_entries_are_bracketed():
+    target = AuthorizedTarget(hostname="localhost", port=8123, address="::1")
+    assert target.curl_resolve_entry() == "localhost:8123:[::1]"
+    literal = AuthorizedTarget(hostname="::1", port=8123, address="::1")
+    assert literal.curl_resolve_entry() == "[::1]:8123:[::1]"
+
+
 @pytest.mark.asyncio
 async def test_real_owned_loopback_get_and_redirect_refusal(monkeypatch):
+    # Simulate a hostile inherited proxy environment. A compliant served MCP
+    # request must ignore it and still reach only the pinned loopback fixture.
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
     with _owned_http_server() as port:
         server = ScraplingMCPServer(
             allowed_target_origins=(f"http://127.0.0.1:{port}",), allow_loopback_targets=True
@@ -267,3 +288,74 @@ async def test_real_owned_loopback_get_and_redirect_refusal(monkeypatch):
             stealthy_headers=False, retries=1, extraction_type="text"
         )
         assert redirect.status == 302
+
+@pytest.mark.asyncio
+async def test_persistent_mcp_session_pins_each_request_and_ignores_proxy_env(monkeypatch):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with _owned_http_server() as port:
+        server = ScraplingMCPServer(
+            allowed_target_origins=(f"http://127.0.0.1:{port}",), allow_loopback_targets=True
+        )
+        server._served = True
+        await server.open_request_session(session_id="pin-session", impersonate=None)
+        try:
+            response = await server.session_make_request(
+                url=f"http://127.0.0.1:{port}/", session_id="pin-session",
+                stealthy_headers=False, retries=1, extraction_type="text",
+            )
+            assert response.status == 200
+            client = server._sessions["pin-session"].session._client._async_curl_session
+            assert client.trust_env is False
+            assert client.curl_options[CurlOpt.RESOLVE] == [f"127.0.0.1:{port}:127.0.0.1"]
+            response = await server.session_make_request(
+                url=f"http://127.0.0.1:{port}/redirect", session_id="pin-session",
+                stealthy_headers=False, retries=1, extraction_type="text",
+            )
+            assert response.status == 302
+            with pytest.raises(ValueError, match="allowlist"):
+                await server.session_make_request(
+                    url="http://127.0.0.1:80/", session_id="pin-session",
+                    stealthy_headers=False, retries=1,
+                )
+        finally:
+            await server.close_session("pin-session")
+
+
+@pytest.mark.asyncio
+async def test_mcp_curl_pin_connects_to_owned_fixture_without_hostname_dns(monkeypatch):
+    # A synthetic approved-target decision is injected *only inside this test*.
+    # The normal MCP policy never allows a public-looking alias to a local IP.
+    # A .invalid hostname cannot resolve using system DNS; success proves that
+    # the served MCP request used the reviewed curl pin instead.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with _owned_http_server() as port:
+        host = "goreecloud-pin-integration.invalid"
+        url = f"http://{host}:{port}/"
+        async def only_approved_test_url(target):
+            assert target == url
+            return AuthorizedTarget(hostname=host, port=port, address="127.0.0.1")
+        server = ScraplingMCPServer()
+        server._served = True
+        server._targets = SimpleNamespace(require=only_approved_test_url)
+        response = await server.make_request(
+            url, impersonate=None, stealthy_headers=False, retries=1,
+            follow_redirects=False, extraction_type="text", timeout=3,
+        )
+        assert response.status == 200
+        assert any("Controlled page" in content for content in response.content)
+
+
+@pytest.mark.asyncio
+async def test_served_mcp_http3_refused_before_connect():
+    server = ScraplingMCPServer(allowed_target_origins=("https://example.org",))
+    server._served = True
+    with patch("scrapling.core.ai.server.FetcherSession") as session:
+        with pytest.raises(ValueError, match="HTTP/3"):
+            await server.make_request("https://example.org", http3=True)
+        session.assert_not_called()

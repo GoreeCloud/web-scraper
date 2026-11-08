@@ -6,6 +6,8 @@ Always combine with a sandbox/firewall for untrusted callers.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from asyncio import to_thread
 from ipaddress import ip_address
 from socket import getaddrinfo, SOCK_STREAM
@@ -44,12 +46,24 @@ def _origin(url: str, *, configured: bool = False) -> tuple[str, str, int]:
     return parsed.scheme, hostname.lower(), port or (443 if parsed.scheme == "https" else 80)
 
 
+@dataclass(frozen=True)
+class AuthorizedTarget:
+    hostname: str
+    port: int
+    address: str
+
+    def curl_resolve_entry(self) -> str:
+        host = f"[{self.hostname}]" if ":" in self.hostname else self.hostname
+        address = f"[{self.address}]" if ":" in self.address else self.address
+        return f"{host}:{self.port}:{address}"
+
+
 class MCPDestinationPolicy:
     def __init__(self, allowed_origins: tuple[str, ...] = (), allow_loopback: bool = False):
         self.origins = frozenset(_origin(origin, configured=True) for origin in allowed_origins)
         self.allow_loopback = bool(allow_loopback)
 
-    async def require(self, target_url: str) -> None:
+    async def require(self, target_url: str) -> AuthorizedTarget:
         scheme, hostname, port = _origin(target_url)
         if (scheme, hostname, port) not in self.origins:
             raise ValueError("Target destination is not in the configured MCP origin allowlist")
@@ -78,3 +92,8 @@ class MCPDestinationPolicy:
             for ip in addresses
         ):
             raise ValueError("Target DNS addresses include private, local, reserved, or unapproved IP space")
+
+        # Select the already-validated address for libcurl's CURLOPT_RESOLVE.
+        # Prefer IPv4 when both families are available for broad dual-stack support.
+        pinned = next((ip for ip in addresses if ip.version == 4), addresses[0])
+        return AuthorizedTarget(hostname, port, str(pinned))

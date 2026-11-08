@@ -1,12 +1,12 @@
 import re
-from asyncio import CancelledError, create_task, shield, sleep
+from asyncio import CancelledError, Lock, create_task, shield, sleep
 from uuid import uuid4
 from os import environ
 from json import dumps
 from time import monotonic
 from hmac import compare_digest
 from ipaddress import ip_address
-from ._target_policy import MCPDestinationPolicy
+from ._target_policy import AuthorizedTarget, MCPDestinationPolicy
 from functools import wraps
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from anyio import CancelScope
 from curl_cffi.curl import CurlError
+from curl_cffi import CurlOpt
 from curl_cffi.requests import BrowserTypeLiteral
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
@@ -259,6 +260,7 @@ class ScraplingMCPServer:
         self._served = False
         self._targets = MCPDestinationPolicy(tuple(allowed_target_origins), allow_loopback_targets)
         self._enable_unrestricted_browser_tools = enable_unrestricted_browser_tools
+        self._served_http_lock = Lock()
 
     def _require_browser_tool(self) -> None:
         if self._served and not self._enable_unrestricted_browser_tools:
@@ -275,9 +277,12 @@ class ScraplingMCPServer:
         verify: Optional[bool] = True,
         proxy: Optional[str] = None,
         headers: Optional[Mapping[str, Optional[str]]] = None,
-    ) -> FollowRedirects:
+        http3: Optional[bool] = False,
+    ) -> Tuple[FollowRedirects, Optional[AuthorizedTarget]]:
         if not self._served:
-            return follow_redirects
+            return follow_redirects, None
+        if http3:
+            raise ValueError("HTTP/3 is not yet qualified for served MCP destination pinning")
         if proxy:
             raise ValueError("Per-request HTTP proxies are disabled for served MCP tools")
         if verify is False:
@@ -289,8 +294,22 @@ class ScraplingMCPServer:
             "x-original-host", "x-rewrite-url", "x-original-url",
         } for name in headers):
             raise ValueError("Host/proxy/routing override headers are prohibited")
-        await self._targets.require(url)
-        return False
+        pinned = await self._targets.require(url)
+        return False, pinned
+
+    @staticmethod
+    def _pin_curl_destination(session: Any, authorized: AuthorizedTarget) -> None:
+        """Pin the exact approved target IP on the active curl session.
+
+        This prevents a second DNS lookup from rebinding to private addresses.
+        Disable implicit environment proxies so the hostname cannot be routed
+        by HTTP_PROXY/HTTPS_PROXY/ALL_PROXY after the preflight.
+        """
+        client = session._async_curl_session
+        if client is None:
+            raise RuntimeError("No active HTTP client available for destination pinning")
+        client.trust_env = False
+        client.curl_options[CurlOpt.RESOLVE] = [authorized.curl_resolve_entry()]
 
     def _resolve_executable_path(self, executable_path: Optional[str]) -> Optional[str]:
         """Return a per-call executable path or the server-wide default."""
@@ -817,8 +836,9 @@ class ScraplingMCPServer:
         ] = True,
     ) -> ResponseModel:
         """Make an HTTP request without JavaScript. Suitable for low-to-mid protection."""
-        follow_redirects = await self._require_static_target(
-            url, follow_redirects=follow_redirects, verify=verify, proxy=proxy, headers=headers
+        follow_redirects, pinned_target = await self._require_static_target(
+            url, follow_redirects=follow_redirects, verify=verify, proxy=proxy,
+            headers=headers, http3=http3
         )
         if self._served and proxy_auth:
             raise ValueError("Proxy authentication is forbidden for served MCP requests")
@@ -846,6 +866,8 @@ class ScraplingMCPServer:
             request_kwargs.update(data=data, json=json)
 
         async with FetcherSession() as session:
+            if pinned_target is not None:
+                self._pin_curl_destination(session, pinned_target)
             page = await getattr(session, method.lower())(url, **request_kwargs)
             return _translate_response(page, extraction_type, css_selector, main_content_only)
 
@@ -1071,8 +1093,8 @@ class ScraplingMCPServer:
     ) -> ResponseModel:
         """Make an HTTP request using the session's cookies, connections, impersonation, and proxy. Options apply to this request."""
         entry = self._get_session(session_id, expected_type=["static"])
-        follow_redirects = await self._require_static_target(
-            url, follow_redirects=follow_redirects, verify=verify, headers=headers
+        follow_redirects, pinned_target = await self._require_static_target(
+            url, follow_redirects=follow_redirects, verify=verify, headers=headers, http3=http3
         )
 
         request_kwargs: Dict[str, Any] = dict(
@@ -1092,7 +1114,14 @@ class ScraplingMCPServer:
         if method != "GET":
             request_kwargs.update(data=data, json=json)
 
-        page = await getattr(entry.session._client, method.lower())(url, **request_kwargs)
+        if pinned_target is None:
+            page = await getattr(entry.session._client, method.lower())(url, **request_kwargs)
+        else:
+            # Persistent sessions share a curl handle: serialize pin replacement
+            # and the request to avoid cross-target pin races.
+            async with self._served_http_lock:
+                self._pin_curl_destination(entry.session._client, pinned_target)
+                page = await getattr(entry.session._client, method.lower())(url, **request_kwargs)
         return _translate_response(page, extraction_type, css_selector, main_content_only)
 
     @staticmethod
