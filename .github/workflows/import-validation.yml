@@ -80,6 +80,41 @@ jobs:
           test -n "$wheel"
           python -m pip install "${wheel}[ai]" pytest pytest-asyncio pytest-httpbin
           python -m pip check
+      - name: Verify reproducible metadata-only CycloneDX inventory (nonpublishing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test_dependency_inventory.py
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          python scripts/generate_dependency_inventory.py --output "$work/mcp-first.json"
+          python scripts/generate_dependency_inventory.py --output "$work/mcp-second.json"
+          cmp "$work/mcp-first.json" "$work/mcp-second.json"
+          python - "$work/mcp-first.json" <<'PYINVENTORY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          data = Path(sys.argv[1]).read_bytes()
+          bom = json.loads(data)
+          assert bom["bomFormat"] == "CycloneDX"
+          assert bom["specVersion"] == "1.5"
+          assert bom["metadata"]["component"]["name"] == "goreecloud-web-scraper"
+          packages = bom["components"]
+          assert len(packages) == len({package["bom-ref"] for package in packages})
+          unknown = sum(not package.get("licenses") for package in packages)
+          digest = hashlib.sha256(data).hexdigest()
+          summary = (
+              f"Metadata-only MCP development inventory: {len(packages)} installed distributions; "
+              f"{unknown} packages without structured license metadata; "
+              f"deterministic SHA-256 `{digest}`. "
+              "This is NOT a full reviewed license/SBOM or a deployment artifact.\n"
+          )
+          print(summary)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as target:
+              target.write(summary)
+          PYINVENTORY
       - name: Run MCP transport, destination and authenticated owned-loopback tests
         run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py tests/goreecloud/test_mcp_capacity.py
       - name: Verify inherited MCP auth and metadata regressions
