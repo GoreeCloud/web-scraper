@@ -116,7 +116,7 @@ jobs:
               target.write(summary)
           PYINVENTORY
       - name: Run MCP transport, destination and authenticated owned-loopback tests
-        run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py tests/goreecloud/test_mcp_capacity.py tests/goreecloud/test_mcp_rate_output.py
+        run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py tests/goreecloud/test_mcp_capacity.py tests/goreecloud/test_mcp_rate_output.py tests/goreecloud/test_mcp_total_budget.py
       - name: Verify inherited MCP auth and metadata regressions
         run: |
           python -m pytest -q -o addopts='' tests/ai/test_ai_mcp.py             -k 'TestStaticTokenVerifier or TestMCPServerAuthentication or test_server_metadata_and_tool_annotations'
