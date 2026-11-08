@@ -72,7 +72,12 @@ def _read_checkpoint(path: Path) -> CheckpointData:
         content = f.read(MAX_CHECKPOINT_BYTES + 1)
     if len(content) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Checkpoint exceeds size limit")
-    data = _RestrictedCheckpointUnpickler(io.BytesIO(content)).load()
+    source = io.BytesIO(content)
+    data = _RestrictedCheckpointUnpickler(source).load()
+    if source.read(1):
+        # A valid checkpoint is exactly one pickle stream. Do not silently
+        # accept extra serialized objects or concealed trailing payloads.
+        raise ValueError("Checkpoint has unexpected trailing data")
     from scrapling.spiders.request import Request
     if not isinstance(data, CheckpointData):
         raise ValueError("Checkpoint data type is invalid")
@@ -84,6 +89,34 @@ def _read_checkpoint(path: Path) -> CheckpointData:
         isinstance(item, (bytes, str)) for item in data.seen
     ):
         raise ValueError("Checkpoint seen fingerprints are invalid")
+    for request in data.requests:
+        # find_class only prevents unexpected Python classes; a crafted pickle
+        # can still set arbitrary malformed fields on an allowed Request.
+        # Check fields consumed later by the crawler before returning it.
+        state = vars(request)
+        if (
+            not isinstance(state.get("url"), str)
+            or not isinstance(state.get("sid"), str)
+            or type(state.get("priority")) is not int
+            or type(state.get("dont_filter")) is not bool
+            or not isinstance(state.get("meta"), dict)
+            or type(state.get("_retry_count")) is not int
+            or state["_retry_count"] < 0
+            or not isinstance(state.get("_session_kwargs"), dict)
+            or state.get("callback", object()) is not None
+            or not (
+                state.get("_fp") is None or isinstance(state.get("_fp"), bytes)
+            )
+        ):
+            raise ValueError("Checkpoint request state is invalid")
+        callback_name = state.get("_callback_name")
+        if callback_name is not None and (
+            not isinstance(callback_name, str)
+            or len(callback_name) > 256
+            or not callback_name.isidentifier()
+            or (callback_name.startswith("__") and callback_name.endswith("__"))
+        ):
+            raise ValueError("Checkpoint callback name is invalid")
     return data
 
 
