@@ -80,7 +80,7 @@ jobs:
           test -n "$wheel"
           python -m pip install "${wheel}[ai]" pytest pytest-asyncio pytest-httpbin
           python -m pip check
-      - name: Run MCP transport and authentication tests (in-memory ASGI, no listeners)
+      - name: Run MCP transport, destination and authenticated owned-loopback tests
         run: python -m pytest -q -o addopts='' tests/goreecloud/test_mcp_guardrails.py tests/goreecloud/test_mcp_destinations.py tests/goreecloud/test_mcp_live_listener.py
       - name: Verify inherited MCP auth and metadata regressions
         run: |
