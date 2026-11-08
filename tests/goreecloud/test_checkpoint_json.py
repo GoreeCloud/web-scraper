@@ -247,3 +247,12 @@ def test_json_decoder_rejects_nonfinite_constants():
     raw = b'{"data": NaN, "format": "goreecloud-checkpoint-json", "sha256": "", "version": 1}'
     with pytest.raises(ValueError):
         decode_checkpoint_json(raw)
+
+def test_json_wrapper_depth_allows_valid_nested_values():
+    value = b"deep"
+    for _ in range(10):
+        value = [value]
+    original = CheckpointData(requests=[Request("https://example.invalid/", meta={"nested": value})])
+    raw = encode_checkpoint_json(original)
+    restored = decode_checkpoint_json(raw)
+    assert restored.requests[0].meta == {"nested": value}

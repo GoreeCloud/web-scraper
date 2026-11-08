@@ -207,7 +207,13 @@ def _check_untrusted_json_limits(
     value: object, budget: _Budget, depth: int = 0,
 ) -> None:
     """Bound raw JSON object traversal *before* canonical digest creation."""
-    budget.enter(depth)
+    # The JSON wire representation adds type wrappers and pair arrays for
+    # each inert value. Its structural depth/element count must therefore
+    # have a distinct pre-hash ceiling from the decoded Python value depth.
+    # _unpack() still enforces the strict MAX_JSON_DEPTH/MAX_JSON_TREE_NODES.
+    budget.nodes += 1
+    if depth > (MAX_JSON_DEPTH * 4 + 16) or budget.nodes > (MAX_JSON_TREE_NODES * 6):
+        raise ValueError("Checkpoint raw JSON structure exceeds safety limits")
     if type(value) is str:
         if len(value) > (MAX_JSON_ATOM_BYTES * 4 // 3 + 8):
             raise ValueError("Checkpoint raw JSON string exceeds size limit")
