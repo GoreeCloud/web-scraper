@@ -104,11 +104,19 @@ class Spider(ABC):
     log_file: Optional[str] = None
     log_file_encoding: Optional[str] = None
 
-    def __init__(self, crawldir: Optional[Union[str, Path, AsyncPath]] = None, interval: float = 300.0):
+    def __init__(
+        self,
+        crawldir: Optional[Union[str, Path, AsyncPath]] = None,
+        interval: float = 300.0,
+        *,
+        checkpoint_format: str = "pickle",
+    ):
         """Initialize the spider.
 
         :param crawldir: Directory for checkpoint files. If provided, enables pause/resume.
         :param interval: Seconds between periodic checkpoint saves (default 5 minutes).
+        :param checkpoint_format: 'pickle' (legacy default) or explicit 'json_v1'
+            (supported inert types only; separate checkpoint.json; no auto-migration).
         """
         if self.name is None:
             raise ValueError(f"{self.__class__.__name__} must have a name.")
@@ -137,6 +145,9 @@ class Spider(ABC):
             self.logger.addHandler(file_handler)
 
         self.crawldir: Optional[Path] = Path(crawldir) if crawldir else None
+        if checkpoint_format not in ("pickle", "json_v1"):
+            raise ValueError("checkpoint_format must be 'pickle' or 'json_v1'")
+        self.checkpoint_format = checkpoint_format
         self._interval = interval
         self._engine: Optional[CrawlerEngine] = None
         self._original_sigint_handler: Any = None
@@ -263,7 +274,10 @@ class Spider(ABC):
     async def __run(self) -> CrawlResult:
         token = set_logger(self.logger)
         try:
-            self._engine = CrawlerEngine(self, self._session_manager, self.crawldir, self._interval)
+            self._engine = CrawlerEngine(
+                self, self._session_manager, self.crawldir, self._interval,
+                checkpoint_format=self.checkpoint_format,
+            )
             stats = await self._engine.crawl()
             paused = self._engine.paused
             return CrawlResult(stats=stats, items=self._engine.items, paused=paused)
@@ -312,7 +326,10 @@ class Spider(ABC):
         """
         token = set_logger(self.logger)
         try:
-            self._engine = CrawlerEngine(self, self._session_manager, self.crawldir, self._interval)
+            self._engine = CrawlerEngine(
+                self, self._session_manager, self.crawldir, self._interval,
+                checkpoint_format=self.checkpoint_format,
+            )
             async for item in self._engine:
                 yield item
         finally:

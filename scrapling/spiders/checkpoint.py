@@ -54,7 +54,7 @@ class _RestrictedCheckpointUnpickler(pickle.Unpickler):
         return Request
 
 
-def _read_checkpoint(path: Path) -> CheckpointData:
+def _read_checkpoint_bytes(path: Path) -> bytes:
     # On supported Unix hosts, O_NOFOLLOW prevents final-component symlink swaps.
     # O_NONBLOCK prevents a replaced FIFO from blocking the crawler indefinitely.
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -72,7 +72,12 @@ def _read_checkpoint(path: Path) -> CheckpointData:
         content = f.read(MAX_CHECKPOINT_BYTES + 1)
     if len(content) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Checkpoint exceeds size limit")
-    source = io.BytesIO(content)
+    return content
+
+
+def _read_checkpoint(path: Path) -> CheckpointData:
+    """Read the inherited restricted legacy pickle checkpoint."""
+    source = io.BytesIO(_read_checkpoint_bytes(path))
     data = _RestrictedCheckpointUnpickler(source).load()
     if source.read(1):
         # A valid checkpoint is exactly one pickle stream. Do not silently
@@ -144,9 +149,16 @@ class CheckpointManager:
 
     CHECKPOINT_FILE = "checkpoint.pkl"
 
-    def __init__(self, crawldir: str | Path | AsyncPath, interval: float = 300.0):
+    def __init__(
+        self, crawldir: str | Path | AsyncPath, interval: float = 300.0,
+        *, checkpoint_format: str = "pickle",
+    ):
+        if checkpoint_format not in ("pickle", "json_v1"):
+            raise ValueError("checkpoint_format must be 'pickle' or 'json_v1'")
+        self.checkpoint_format = checkpoint_format
         self.crawldir = AsyncPath(crawldir)
-        self._checkpoint_path = self.crawldir / self.CHECKPOINT_FILE
+        filename = "checkpoint.json" if checkpoint_format == "json_v1" else self.CHECKPOINT_FILE
+        self._checkpoint_path = self.crawldir / filename
         self.interval = interval
         if not isinstance(interval, (int, float)):
             raise TypeError("Checkpoints interval must be integer or float.")
@@ -160,7 +172,11 @@ class CheckpointManager:
         """Save checkpoint atomically with private (0600) temporary permissions."""
         await self.crawldir.mkdir(parents=True, exist_ok=True)
         try:
-            serialized = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+            if self.checkpoint_format == "json_v1":
+                from scrapling.spiders._checkpoint_json import encode_checkpoint_json
+                serialized = encode_checkpoint_json(data)
+            else:
+                serialized = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
             await anyio.to_thread.run_sync(
                 _atomic_checkpoint_write, Path(self._checkpoint_path), serialized
             )
@@ -174,9 +190,16 @@ class CheckpointManager:
         if not await self.has_checkpoint():
             return None
         try:
-            data = await anyio.to_thread.run_sync(
-                _read_checkpoint, Path(self._checkpoint_path)
-            )
+            if self.checkpoint_format == "json_v1":
+                from scrapling.spiders._checkpoint_json import decode_checkpoint_json
+                raw = await anyio.to_thread.run_sync(
+                    _read_checkpoint_bytes, Path(self._checkpoint_path)
+                )
+                data = decode_checkpoint_json(raw)
+            else:
+                data = await anyio.to_thread.run_sync(
+                    _read_checkpoint, Path(self._checkpoint_path)
+                )
             log.info(f"Checkpoint loaded: {len(data.requests)} requests, {len(data.seen)} seen URLs")
             return data
         except Exception as e:
